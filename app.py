@@ -176,9 +176,15 @@ def get_krs_data(krs):
                 identyfikatory.get("regon")
             ),
 
-            "Data rejestracji": first_value(
-                dzial1.get("dataRejestracji")
-            ),
+          naglowek = data.get(
+    "naglowekA",
+    {}
+)
+
+"Data rejestracji": first_value(
+    dzial1.get("dataRejestracji"),
+    naglowek.get("dataRejestracji"),
+    naglowek.get("dataRejestracjiPodmiotu")
 
             "Województwo": first_value(
                 adres.get("wojewodztwo"),
