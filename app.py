@@ -161,10 +161,8 @@ def get_krs_data(krs):
         # -------------------------------------------------
 
         data_rejestracji = first_value(
-            dzial1.get("dataRejestracji"),
-            dane_podmiotu.get("dataRejestracji"),
-            dzial1.get("dataWpisu")
-        )
+    dzial1.get("dataRejestracji")
+)
 
         # -------------------------------------------------
         # ADRES
