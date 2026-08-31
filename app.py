@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import requests
 
 st.set_page_config(
     page_title="Sanctions Screening",
@@ -8,7 +9,6 @@ st.set_page_config(
 )
 
 st.title("🔎 Sanctions Screening")
-st.write("Wgraj plik CSV z kontrahentami.")
 
 uploaded_file = st.file_uploader(
     "Wybierz plik CSV",
@@ -18,23 +18,62 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
 
     try:
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(uploaded_file, dtype=str)
 
         st.success(
-            f"Plik wczytany poprawnie — {len(df)} kontrahentów."
+            f"Plik wczytany poprawnie — {len(df)} rekordów."
         )
 
-        st.subheader("Podgląd danych")
+        st.subheader("Kontrahenci")
+        st.dataframe(df, use_container_width=True)
 
-        st.dataframe(
-            df,
-            use_container_width=True
-        )
+        if "NIP" not in df.columns:
+            st.error("CSV musi zawierać kolumnę 'NIP'.")
+            st.stop()
 
-        st.subheader("Wykryte kolumny")
+        if st.button("🔎 Sprawdź KRS", type="primary"):
 
-        for column in df.columns:
-            st.write(f"- `{column}`")
+            results = []
+
+            progress = st.progress(0)
+
+            for i, row in df.iterrows():
+
+                nip = str(row["NIP"]).strip()
+
+                # usuwamy ewentualne spacje i myślniki
+                nip = nip.replace(" ", "").replace("-", "")
+
+                result = {
+                    "NIP": nip,
+                    "KRS": "",
+                    "Nazwa KRS": "",
+                    "REGON": "",
+                    "Status": ""
+                }
+
+                try:
+                    # TODO: tutaj podłączymy właściwe zapytanie KRS
+                    # na razie testujemy strukturę aplikacji
+
+                    result["Status"] = "DO SPRAWDZENIA"
+
+                except Exception as e:
+                    result["Status"] = f"BŁĄD: {e}"
+
+                results.append(result)
+
+                progress.progress(
+                    (i + 1) / len(df)
+                )
+
+            results_df = pd.DataFrame(results)
+
+            st.subheader("Wyniki KRS")
+            st.dataframe(
+                results_df,
+                use_container_width=True
+            )
 
     except Exception as e:
 
