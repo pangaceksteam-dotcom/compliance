@@ -211,7 +211,7 @@ def get_krs_data(krs):
         # DATA REJESTRACJI
         # =================================================
 
-       data_rejestracji = first_value(
+        data_rejestracji = first_value(
             naglowek.get(
                 "dataRejestracjiWKRS"
             )
