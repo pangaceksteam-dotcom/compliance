@@ -23,9 +23,13 @@ st.write("Wgraj plik CSV z kontrahentami.")
 # =========================================================
 
 def first_value(*values):
+
     for value in values:
+
         if value is not None:
+
             value = str(value).strip()
+
             if value:
                 return value
 
@@ -52,6 +56,7 @@ def get_company_from_mf(nip):
     )
 
     if response.status_code != 200:
+
         return None, f"MF HTTP {response.status_code}"
 
     try:
@@ -64,12 +69,15 @@ def get_company_from_mf(nip):
             "krs": first_value(
                 subject.get("krs")
             ),
+
             "name": first_value(
                 subject.get("name")
             ),
+
             "regon": first_value(
                 subject.get("regon")
             )
+
         }, "OK"
 
     except Exception as e:
@@ -95,17 +103,24 @@ def get_krs_data(krs):
     )
 
     if response.status_code == 204:
-        return None, "KRS 204 — brak danych"
+
+        return None, None, "KRS 204 — brak danych"
 
     if response.status_code == 404:
-        return None, "KRS 404 — nie znaleziono"
+
+        return None, None, "KRS 404 — nie znaleziono"
 
     if response.status_code != 200:
-        return None, f"KRS HTTP {response.status_code}"
+
+        return None, None, f"KRS HTTP {response.status_code}"
 
     try:
 
         data = response.json()
+
+        # =================================================
+        # DEBUG - POKAZUJEMY SUROWY JSON
+        # =================================================
 
         # -------------------------------------------------
         # STRUKTURA KRS
@@ -151,83 +166,220 @@ def get_krs_data(krs):
             {}
         )
 
-        # -------------------------------------------------
-        # DANE
-        # -------------------------------------------------
+        # =================================================
+        # NAGŁÓWEK
+        # =================================================
+
+        naglowek = data.get(
+            "naglowekA",
+            {}
+        )
+
+        # =================================================
+        # DANE PODMIOTU
+        # =================================================
+
+        nazwa = first_value(
+            dane_podmiotu.get(
+                "nazwa"
+            ),
+
+            dane_podmiotu.get(
+                "nazwaSkrocona"
+            )
+        )
+
+        nip = first_value(
+            identyfikatory.get(
+                "nip"
+            )
+        )
+
+        regon = first_value(
+            identyfikatory.get(
+                "regon"
+            )
+        )
+
+        forma_prawna = first_value(
+            dane_podmiotu.get(
+                "formaPrawna"
+            )
+        )
+
+        # =================================================
+        # DATA REJESTRACJI
+        # =================================================
+
+        data_rejestracji = first_value(
+
+            dzial1.get(
+                "dataRejestracji"
+            ),
+
+            dane_podmiotu.get(
+                "dataRejestracji"
+            ),
+
+            naglowek.get(
+                "dataRejestracji"
+            ),
+
+            naglowek.get(
+                "dataRejestracjiPodmiotu"
+            )
+        )
+
+        # =================================================
+        # INNE DATY
+        # =================================================
+
+        data_ostatniego_wpisu = first_value(
+
+            dzial1.get(
+                "dataOstatniegoWpisu"
+            ),
+
+            dzial1.get(
+                "dataWpisu"
+            ),
+
+            naglowek.get(
+                "dataOstatniegoWpisu"
+            )
+        )
+
+        stan_na_dzien = first_value(
+
+            dzial1.get(
+                "stanNaDzien"
+            ),
+
+            dzial1.get(
+                "stanZDnia"
+            ),
+
+            naglowek.get(
+                "stanNaDzien"
+            )
+        )
+
+        # =================================================
+        # ADRES
+        # =================================================
+
+        wojewodztwo = first_value(
+
+            adres.get(
+                "wojewodztwo"
+            ),
+
+            siedziba.get(
+                "wojewodztwo"
+            )
+        )
+
+        powiat = first_value(
+
+            adres.get(
+                "powiat"
+            ),
+
+            siedziba.get(
+                "powiat"
+            )
+        )
+
+        gmina = first_value(
+
+            adres.get(
+                "gmina"
+            ),
+
+            siedziba.get(
+                "gmina"
+            )
+        )
+
+        miejscowosc = first_value(
+
+            adres.get(
+                "miejscowosc"
+            ),
+
+            siedziba.get(
+                "miejscowosc"
+            )
+        )
+
+        ulica = first_value(
+            adres.get(
+                "ulica"
+            )
+        )
+
+        nr_domu = first_value(
+            adres.get(
+                "nrDomu"
+            )
+        )
+
+        nr_lokalu = first_value(
+            adres.get(
+                "nrLokalu"
+            )
+        )
+
+        kod_pocztowy = first_value(
+            adres.get(
+                "kodPocztowy"
+            )
+        )
+
+        # =================================================
+        # WYNIK
+        # =================================================
 
         result = {
 
             "KRS": krs,
 
-            "Nazwa KRS": first_value(
-                dane_podmiotu.get("nazwa"),
-                dane_podmiotu.get("nazwaSkrocona")
-            ),
+            "Nazwa KRS": nazwa,
 
-            "Forma prawna": first_value(
-                dane_podmiotu.get("formaPrawna")
-            ),
+            "Forma prawna": forma_prawna,
 
-            "NIP KRS": first_value(
-                identyfikatory.get("nip")
-            ),
+            "NIP KRS": nip,
 
-            "REGON KRS": first_value(
-                identyfikatory.get("regon")
-            ),
+            "REGON KRS": regon,
 
-          naglowek = data.get(
-    "naglowekA",
-    {}
-)
+            "Data rejestracji": data_rejestracji,
 
-"Data rejestracji": first_value(
-    dzial1.get("dataRejestracji"),
-    naglowek.get("dataRejestracji"),
-    naglowek.get("dataRejestracjiPodmiotu")
+            "Data ostatniego wpisu": data_ostatniego_wpisu,
 
-            "Województwo": first_value(
-                adres.get("wojewodztwo"),
-                siedziba.get("wojewodztwo")
-            ),
+            "Stan na dzień": stan_na_dzien,
 
-            "Powiat": first_value(
-                adres.get("powiat"),
-                siedziba.get("powiat")
-            ),
+            "Województwo": wojewodztwo,
 
-            "Gmina": first_value(
-                adres.get("gmina"),
-                siedziba.get("gmina")
-            ),
+            "Powiat": powiat,
 
-            "Miejscowość": first_value(
-                adres.get("miejscowosc"),
-                siedziba.get("miejscowosc")
-            ),
+            "Gmina": gmina,
 
-            "Ulica": first_value(
-                adres.get("ulica")
-            ),
+            "Miejscowość": miejscowosc,
 
-            "Nr domu": first_value(
-                adres.get("nrDomu")
-            ),
+            "Ulica": ulica,
 
-            "Nr lokalu": first_value(
-                adres.get("nrLokalu")
-            ),
+            "Nr domu": nr_domu,
 
-            "Kod pocztowy": first_value(
-                adres.get("kodPocztowy")
-            )
+            "Nr lokalu": nr_lokalu,
+
+            "Kod pocztowy": kod_pocztowy
         }
 
-        return result, "OK"
+        return result, data, "OK"
 
     except Exception as e:
 
-        return None, f"Błąd parsowania KRS: {e}"
+        return None, None, f"Błąd parsowania KRS: {e}"
 
 
 # =========================================================
@@ -244,9 +396,9 @@ if uploaded_file is not None:
 
     try:
 
-        # -------------------------------------------------
+        # =================================================
         # WCZYTANIE CSV
-        # -------------------------------------------------
+        # =================================================
 
         df = pd.read_csv(
             uploaded_file,
@@ -263,9 +415,9 @@ if uploaded_file is not None:
             f"{len(df)} rekordów."
         )
 
-        # -------------------------------------------------
+        # =================================================
         # PODGLĄD
-        # -------------------------------------------------
+        # =================================================
 
         st.subheader(
             "Kontrahenci"
@@ -276,9 +428,9 @@ if uploaded_file is not None:
             use_container_width=True
         )
 
-        # -------------------------------------------------
+        # =================================================
         # WALIDACJA
-        # -------------------------------------------------
+        # =================================================
 
         if "NIP" not in df.columns:
 
@@ -288,9 +440,9 @@ if uploaded_file is not None:
 
             st.stop()
 
-        # -------------------------------------------------
+        # =================================================
         # PRZYCISK
-        # -------------------------------------------------
+        # =================================================
 
         if st.button(
             "🔎 Sprawdź KRS",
@@ -299,15 +451,17 @@ if uploaded_file is not None:
 
             results = []
 
+            debug_data = {}
+
             progress = st.progress(0)
 
             status_text = st.empty()
 
             total = len(df)
 
-            # =============================================
+            # =================================================
             # PĘTLA
-            # =============================================
+            # =================================================
 
             for i, row in df.iterrows():
 
@@ -334,9 +488,9 @@ if uploaded_file is not None:
                     f"— NIP: {nip}"
                 )
 
-                # -----------------------------------------
+                # ---------------------------------------------
                 # PUSTY REKORD
-                # -----------------------------------------
+                # ---------------------------------------------
 
                 result = {
 
@@ -357,6 +511,10 @@ if uploaded_file is not None:
                     "REGON KRS": "",
 
                     "Data rejestracji": "",
+
+                    "Data ostatniego wpisu": "",
+
+                    "Stan na dzień": "",
 
                     "Województwo": "",
 
@@ -379,9 +537,9 @@ if uploaded_file is not None:
                     "Status KRS": ""
                 }
 
-                # =========================================
-                # MF -> KRS
-                # =========================================
+                # =================================================
+                # MF
+                # =================================================
 
                 try:
 
@@ -403,9 +561,9 @@ if uploaded_file is not None:
 
                     else:
 
-                        # -----------------------------
+                        # -----------------------------------------
                         # REGON Z MF
-                        # -----------------------------
+                        # -----------------------------------------
 
                         result["REGON"] = (
                             mf_data.get(
@@ -414,9 +572,9 @@ if uploaded_file is not None:
                             )
                         )
 
-                        # -----------------------------
+                        # -----------------------------------------
                         # KRS
-                        # -----------------------------
+                        # -----------------------------------------
 
                         krs = mf_data.get(
                             "krs",
@@ -425,13 +583,13 @@ if uploaded_file is not None:
 
                         result["KRS"] = krs
 
-                        # =================================
-                        # KRS API
-                        # =================================
+                        # =========================================
+                        # KRS
+                        # =========================================
 
                         if krs:
 
-                            krs_data, krs_status = (
+                            krs_data, raw_json, krs_status = (
                                 get_krs_data(
                                     krs
                                 )
@@ -442,7 +600,15 @@ if uploaded_file is not None:
                             )
 
                             # -----------------------------
-                            # DANE Z KRS
+                            # ZAPIS JSON DO DEBUG
+                            # -----------------------------
+
+                            if raw_json is not None:
+
+                                debug_data[nip] = raw_json
+
+                            # -----------------------------
+                            # DANE KRS
                             # -----------------------------
 
                             if krs_data is not None:
@@ -468,24 +634,20 @@ if uploaded_file is not None:
                     )
 
                 # -----------------------------------------
-                # ZAPIS
+                # DODAJEMY WYNIK
                 # -----------------------------------------
 
                 results.append(
                     result
                 )
 
-                # -----------------------------------------
-                # PROGRESS
-                # -----------------------------------------
-
                 progress.progress(
                     (i + 1) / total
                 )
 
-            # =============================================
-            # WYNIKI
-            # =============================================
+            # =================================================
+            # KONIEC
+            # =================================================
 
             progress.empty()
 
@@ -494,6 +656,10 @@ if uploaded_file is not None:
             results_df = pd.DataFrame(
                 results
             )
+
+            # =================================================
+            # WYNIKI
+            # =================================================
 
             st.subheader(
                 "Wyniki KRS"
@@ -505,9 +671,9 @@ if uploaded_file is not None:
                 height=600
             )
 
-            # =============================================
+            # =================================================
             # STATYSTYKI
-            # =============================================
+            # =================================================
 
             total_companies = len(
                 results_df
@@ -533,9 +699,9 @@ if uploaded_file is not None:
                 ].eq("OK")
             ).sum()
 
-            # =============================================
+            # =================================================
             # METRYKI
-            # =============================================
+            # =================================================
 
             col1, col2, col3, col4 = (
                 st.columns(4)
@@ -568,6 +734,33 @@ if uploaded_file is not None:
                     "Błędy KRS",
                     krs_errors
                 )
+
+            # =================================================
+            # DEBUG JSON
+            # =================================================
+
+            st.divider()
+
+            with st.expander(
+                "🔧 Debug — surowa odpowiedź KRS"
+            ):
+
+                if debug_data:
+
+                    selected_nip = st.selectbox(
+                        "Wybierz NIP:",
+                        list(debug_data.keys())
+                    )
+
+                    st.json(
+                        debug_data[selected_nip]
+                    )
+
+                else:
+
+                    st.write(
+                        "Brak odpowiedzi KRS do pokazania."
+                    )
 
     except Exception as e:
 
