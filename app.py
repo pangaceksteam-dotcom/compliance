@@ -211,23 +211,9 @@ def get_krs_data(krs):
         # DATA REJESTRACJI
         # =================================================
 
-        data_rejestracji = first_value(
-
-            dzial1.get(
-                "dataRejestracji"
-            ),
-
-            dane_podmiotu.get(
-                "dataRejestracji"
-            ),
-
-            naglowek.get(
-                "dataRejestracji"
-            ),
-
-            naglowek.get(
-                "dataRejestracjiPodmiotu"
-            )
+       data_rejestracji = first_value(
+    naglowek.get("dataRejestracjiWKRS")
+)
         )
 
         # =================================================
