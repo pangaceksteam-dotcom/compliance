@@ -33,47 +33,71 @@ if uploaded_file is not None:
 
         if st.button("🔎 Sprawdź KRS", type="primary"):
 
-            results = []
+    results = []
 
-            progress = st.progress(0)
+    progress = st.progress(0)
 
-            for i, row in df.iterrows():
+    for i, row in df.iterrows():
 
-                nip = str(row["NIP"]).strip()
+        nip = str(row["NIP"]).strip()
+        nip = nip.replace(" ", "").replace("-", "")
 
-                # usuwamy ewentualne spacje i myślniki
-                nip = nip.replace(" ", "").replace("-", "")
+        result = {
+            "NIP": nip,
+            "KRS": "",
+            "Nazwa KRS": "",
+            "REGON": "",
+            "Status": ""
+        }
 
-                result = {
-                    "NIP": nip,
-                    "KRS": "",
-                    "Nazwa KRS": "",
-                    "REGON": "",
-                    "Status": ""
-                }
+        try:
+            # TEST:
+            # na razie sprawdzamy jeden znany numer KRS
+            krs = "0000009831"
 
-                try:
-                    # TODO: tutaj podłączymy właściwe zapytanie KRS
-                    # na razie testujemy strukturę aplikacji
+            url = (
+                f"https://api-krs.ms.gov.pl/api/krs/"
+                f"OdpisAktualny/{krs}"
+                f"?rejestr=P&format=json"
+            )
 
-                    result["Status"] = "DO SPRAWDZENIA"
+            response = requests.get(
+                url,
+                timeout=20
+            )
 
-                except Exception as e:
-                    result["Status"] = f"BŁĄD: {e}"
+            if response.status_code == 200:
 
-                results.append(result)
+                data = response.json()
 
-                progress.progress(
-                    (i + 1) / len(df)
+                result["KRS"] = krs
+
+                # Tymczasowo pokazujemy cały JSON
+                result["Status"] = "OK"
+
+            else:
+                result["Status"] = (
+                    f"KRS HTTP {response.status_code}"
                 )
 
-            results_df = pd.DataFrame(results)
+        except Exception as e:
 
-            st.subheader("Wyniki KRS")
-            st.dataframe(
-                results_df,
-                use_container_width=True
-            )
+            result["Status"] = f"BŁĄD: {e}"
+
+        results.append(result)
+
+        progress.progress(
+            (i + 1) / len(df)
+        )
+
+    results_df = pd.DataFrame(results)
+
+    st.subheader("Wyniki KRS")
+
+    st.dataframe(
+        results_df,
+        use_container_width=True
+    )
 
     except Exception as e:
 
