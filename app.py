@@ -16,18 +16,28 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
+
     try:
         df = pd.read_csv(uploaded_file)
 
         st.success(
-            f"Plik wczytany poprawnie — {len(df)} rekordów."
+            f"Plik wczytany poprawnie — {len(df)} kontrahentów."
         )
 
         st.subheader("Podgląd danych")
-        st.dataframe(df, use_container_width=True)
 
-        st.subheader("Kolumny")
-        st.write(list(df.columns))
+        st.dataframe(
+            df,
+            use_container_width=True
+        )
+
+        st.subheader("Wykryte kolumny")
+
+        for column in df.columns:
+            st.write(f"- `{column}`")
 
     except Exception as e:
-        st.error(f"Nie udało się odczytać pliku: {e}")
+
+        st.error(
+            f"Nie udało się odczytać pliku: {e}"
+        )
