@@ -65,7 +65,8 @@ def get_company_from_mf(nip):
 
         subject = data["result"]["subject"]
 
-        return {
+        result = {
+
             "krs": first_value(
                 subject.get("krs")
             ),
@@ -77,8 +78,9 @@ def get_company_from_mf(nip):
             "regon": first_value(
                 subject.get("regon")
             )
+        }
 
-        }, "OK"
+        return result, "OK"
 
     except Exception as e:
 
@@ -119,12 +121,8 @@ def get_krs_data(krs):
         data = response.json()
 
         # =================================================
-        # DEBUG - POKAZUJEMY SUROWY JSON
+        # GŁÓWNA STRUKTURA KRS
         # =================================================
-
-        # -------------------------------------------------
-        # STRUKTURA KRS
-        # -------------------------------------------------
 
         odpis = data.get(
             "odpis",
@@ -141,15 +139,39 @@ def get_krs_data(krs):
             {}
         )
 
+        # =================================================
+        # NAGŁÓWEK ODPISU
+        # =================================================
+
+        # UWAGA:
+        # naglowekA znajduje się wewnątrz "odpis"
+
+        naglowek = odpis.get(
+            "naglowekA",
+            {}
+        )
+
+        # =================================================
+        # DANE PODMIOTU
+        # =================================================
+
         dane_podmiotu = dzial1.get(
             "danePodmiotu",
             {}
         )
 
+        # =================================================
+        # IDENTYFIKATORY
+        # =================================================
+
         identyfikatory = dane_podmiotu.get(
             "identyfikatory",
             {}
         )
+
+        # =================================================
+        # SIEDZIBA I ADRES
+        # =================================================
 
         siedziba_adres = dzial1.get(
             "siedzibaIAdres",
@@ -167,16 +189,7 @@ def get_krs_data(krs):
         )
 
         # =================================================
-        # NAGŁÓWEK
-        # =================================================
-
-        naglowek = data.get(
-            "naglowekA",
-            {}
-        )
-
-        # =================================================
-        # DANE PODMIOTU
+        # PODSTAWOWE DANE
         # =================================================
 
         nazwa = first_value(
@@ -218,10 +231,13 @@ def get_krs_data(krs):
         )
 
         # =================================================
-        # INNE DATY
+        # DATA OSTATNIEGO WPISU
         # =================================================
 
         data_ostatniego_wpisu = first_value(
+            naglowek.get(
+                "dataOstatniegoWpisu"
+            ),
 
             dzial1.get(
                 "dataOstatniegoWpisu"
@@ -229,24 +245,23 @@ def get_krs_data(krs):
 
             dzial1.get(
                 "dataWpisu"
-            ),
-
-            naglowek.get(
-                "dataOstatniegoWpisu"
             )
         )
 
-        stan_na_dzien = first_value(
+        # =================================================
+        # STAN NA DZIEŃ
+        # =================================================
 
-            dzial1.get(
-                "stanNaDzien"
+        stan_na_dzien = first_value(
+            naglowek.get(
+                "stanZDnia"
             ),
 
             dzial1.get(
                 "stanZDnia"
             ),
 
-            naglowek.get(
+            dzial1.get(
                 "stanNaDzien"
             )
         )
@@ -256,7 +271,6 @@ def get_krs_data(krs):
         # =================================================
 
         wojewodztwo = first_value(
-
             adres.get(
                 "wojewodztwo"
             ),
@@ -267,7 +281,6 @@ def get_krs_data(krs):
         )
 
         powiat = first_value(
-
             adres.get(
                 "powiat"
             ),
@@ -278,7 +291,6 @@ def get_krs_data(krs):
         )
 
         gmina = first_value(
-
             adres.get(
                 "gmina"
             ),
@@ -289,7 +301,6 @@ def get_krs_data(krs):
         )
 
         miejscowosc = first_value(
-
             adres.get(
                 "miejscowosc"
             ),
@@ -403,7 +414,7 @@ if uploaded_file is not None:
         )
 
         # =================================================
-        # PODGLĄD
+        # PODGLĄD CSV
         # =================================================
 
         st.subheader(
@@ -416,7 +427,7 @@ if uploaded_file is not None:
         )
 
         # =================================================
-        # WALIDACJA
+        # WALIDACJA NIP
         # =================================================
 
         if "NIP" not in df.columns:
@@ -428,7 +439,7 @@ if uploaded_file is not None:
             st.stop()
 
         # =================================================
-        # PRZYCISK
+        # PRZYCISK SCREENINGU
         # =================================================
 
         if st.button(
@@ -447,10 +458,14 @@ if uploaded_file is not None:
             total = len(df)
 
             # =================================================
-            # PĘTLA
+            # PĘTLA PO KONTRAHENTACH
             # =================================================
 
             for i, row in df.iterrows():
+
+                # ---------------------------------------------
+                # NIP
+                # ---------------------------------------------
 
                 nip = str(
                     row["NIP"]
@@ -461,6 +476,10 @@ if uploaded_file is not None:
                     .replace(" ", "")
                     .replace("-", "")
                 )
+
+                # ---------------------------------------------
+                # NAZWA Z CSV
+                # ---------------------------------------------
 
                 nazwa_csv = str(
                     row.get(
@@ -586,17 +605,17 @@ if uploaded_file is not None:
                                 krs_status
                             )
 
-                            # -----------------------------
-                            # ZAPIS JSON DO DEBUG
-                            # -----------------------------
+                            # -------------------------------------
+                            # DEBUG JSON
+                            # -------------------------------------
 
                             if raw_json is not None:
 
                                 debug_data[nip] = raw_json
 
-                            # -----------------------------
+                            # -------------------------------------
                             # DANE KRS
-                            # -----------------------------
+                            # -------------------------------------
 
                             if krs_data is not None:
 
@@ -621,12 +640,16 @@ if uploaded_file is not None:
                     )
 
                 # -----------------------------------------
-                # DODAJEMY WYNIK
+                # ZAPIS WYNIKU
                 # -----------------------------------------
 
                 results.append(
                     result
                 )
+
+                # -----------------------------------------
+                # PROGRESS
+                # -----------------------------------------
 
                 progress.progress(
                     (i + 1) / total
@@ -723,7 +746,7 @@ if uploaded_file is not None:
                 )
 
             # =================================================
-            # DEBUG JSON
+            # DEBUG
             # =================================================
 
             st.divider()
@@ -746,7 +769,7 @@ if uploaded_file is not None:
                 else:
 
                     st.write(
-                        "Brak odpowiedzi KRS do pokazania."
+                        "Brak odpowiedzi KRS."
                     )
 
     except Exception as e:
