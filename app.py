@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import requests
+from datetime import date
+
 
 # =========================================================
-# USTAWIENIA
+# USTAWIENIA APLIKACJI
 # =========================================================
 
 st.set_page_config(
@@ -15,14 +17,34 @@ st.set_page_config(
 st.title("🔎 Sanctions Screening")
 st.write("Wgraj plik CSV z kontrahentami.")
 
+
 # =========================================================
-# NIP → KRS / DANE PODMIOTU PRZEZ MF
+# FUNKCJA POMOCNICZA
+# =========================================================
+
+def first_value(*values):
+    """
+    Zwraca pierwszą niepustą wartość.
+    """
+
+    for value in values:
+
+        if value is not None:
+
+            value = str(value).strip()
+
+            if value != "":
+                return value
+
+    return ""
+
+
+# =========================================================
+# MF API
+# NIP -> KRS / REGON / NAZWA
 # =========================================================
 
 def get_company_from_mf(nip):
-
-    # API MF wymaga daty
-    from datetime import date
 
     today = date.today().isoformat()
 
@@ -37,6 +59,7 @@ def get_company_from_mf(nip):
     )
 
     if response.status_code != 200:
+
         return None, f"MF HTTP {response.status_code}"
 
     try:
@@ -45,11 +68,22 @@ def get_company_from_mf(nip):
 
         subject = data["result"]["subject"]
 
-        return {
-            "krs": subject.get("krs"),
-            "name": subject.get("name"),
-            "regon": subject.get("regon")
-        }, "OK"
+        result = {
+
+            "krs": first_value(
+                subject.get("krs")
+            ),
+
+            "name": first_value(
+                subject.get("name")
+            ),
+
+            "regon": first_value(
+                subject.get("regon")
+            )
+        }
+
+        return result, "OK"
 
     except Exception as e:
 
@@ -57,7 +91,8 @@ def get_company_from_mf(nip):
 
 
 # =========================================================
-# KRS → DANE Z ODPISU AKTUALNEGO
+# KRS API
+# KRS -> DANE PODMIOTU
 # =========================================================
 
 def get_krs_data(krs):
@@ -73,122 +108,185 @@ def get_krs_data(krs):
         timeout=20
     )
 
+    # Brak danych
     if response.status_code == 204:
+
         return None, "KRS 204 — brak danych"
 
+    # Nie znaleziono
     if response.status_code == 404:
+
         return None, "KRS 404 — nie znaleziono"
 
+    # Inny błąd
     if response.status_code != 200:
+
         return None, f"KRS HTTP {response.status_code}"
 
     try:
 
         data = response.json()
 
-        # ---------------------------------------------
-        # Główna sekcja danych
-        # ---------------------------------------------
+        # =================================================
+        # STRUKTURA ODPISU KRS
+        # =================================================
 
-        odpis = data.get("odpis", {})
-        dane = odpis.get("dane", {})
-        dzial1 = dane.get("dzial1", {})
+        odpis = data.get(
+            "odpis",
+            {}
+        )
 
-        # ---------------------------------------------
-        # Dane podmiotu
-        # ---------------------------------------------
+        dane = odpis.get(
+            "dane",
+            {}
+        )
+
+        dzial1 = dane.get(
+            "dzial1",
+            {}
+        )
+
+        # =================================================
+        # DANE PODMIOTU
+        # =================================================
 
         dane_podmiotu = dzial1.get(
             "danePodmiotu",
             {}
         )
 
+        # =================================================
+        # IDENTYFIKATORY
+        # =================================================
+
         identyfikatory = dane_podmiotu.get(
             "identyfikatory",
             {}
         )
 
-        # ---------------------------------------------
-        # Adres
-        # ---------------------------------------------
+        # =================================================
+        # SIEDZIBA I ADRES
+        # =================================================
 
-        siedziba = dzial1.get(
+        siedziba_adres = dzial1.get(
             "siedzibaIAdres",
             {}
         )
 
-        adres = siedziba.get(
+        adres = siedziba_adres.get(
             "adres",
             {}
         )
 
-        # ---------------------------------------------
-        # Zwracamy uporządkowane dane
-        # ---------------------------------------------
+        siedziba = siedziba_adres.get(
+            "siedziba",
+            {}
+        )
+
+        # =================================================
+        # DANE PODSTAWOWE
+        # =================================================
+
+        nazwa = first_value(
+            dane_podmiotu.get("nazwa"),
+            dane_podmiotu.get("nazwaSkrocona")
+        )
+
+        nip = first_value(
+            identyfikatory.get("nip")
+        )
+
+        regon = first_value(
+            identyfikatory.get("regon")
+        )
+
+        forma_prawna = first_value(
+            dane_podmiotu.get("formaPrawna")
+        )
+
+        # =================================================
+        # DATA REJESTRACJI
+        # =================================================
+
+        data_rejestracji = first_value(
+            dzial1.get("dataRejestracji"),
+            dane_podmiotu.get("dataRejestracji"),
+            dzial1.get("dataWpisu")
+        )
+
+        # =================================================
+        # ADRES
+        # =================================================
+
+        wojewodztwo = first_value(
+            adres.get("wojewodztwo"),
+            siedziba.get("wojewodztwo")
+        )
+
+        powiat = first_value(
+            adres.get("powiat"),
+            siedziba.get("powiat")
+        )
+
+        gmina = first_value(
+            adres.get("gmina"),
+            siedziba.get("gmina")
+        )
+
+        miejscowosc = first_value(
+            adres.get("miejscowosc"),
+            siedziba.get("miejscowosc")
+        )
+
+        ulica = first_value(
+            adres.get("ulica")
+        )
+
+        nr_domu = first_value(
+            adres.get("nrDomu")
+        )
+
+        nr_lokalu = first_value(
+            adres.get("nrLokalu")
+        )
+
+        kod_pocztowy = first_value(
+            adres.get("kodPocztowy")
+        )
+
+        # =================================================
+        # ZŁOŻENIE WYNIKU
+        # =================================================
 
         result = {
 
             "KRS": krs,
 
-            "Nazwa KRS": dane_podmiotu.get(
-                "nazwa",
-                ""
-            ),
+            "Nazwa KRS": nazwa,
 
-            "Forma prawna": dane_podmiotu.get(
-                "formaPrawna",
-                ""
-            ),
+            "Forma prawna": forma_prawna,
 
-            "NIP KRS": identyfikatory.get(
-                "nip",
-                ""
-            ),
+            "NIP KRS": nip,
 
-            "REGON KRS": identyfikatory.get(
-                "regon",
-                ""
-            ),
+            "REGON KRS": regon,
 
-            "Data rejestracji": dzial1.get(
-                "dataRejestracji",
-                ""
-            ),
+            "Data rejestracji": data_rejestracji,
 
-            "Województwo": adres.get(
-                "wojewodztwo",
-                ""
-            ),
+            "Województwo": wojewodztwo,
 
-            "Powiat": adres.get(
-                "powiat",
-                ""
-            ),
+            "Powiat": powiat,
 
-            "Gmina": adres.get(
-                "gmina",
-                ""
-            ),
+            "Gmina": gmina,
 
-            "Miejscowość": adres.get(
-                "miejscowosc",
-                ""
-            ),
+            "Miejscowość": miejscowosc,
 
-            "Ulica": adres.get(
-                "ulica",
-                ""
-            ),
+            "Ulica": ulica,
 
-            "Nr domu": adres.get(
-                "nrDomu",
-                ""
-            ),
+            "Nr domu": nr_domu,
 
-            "Kod pocztowy": adres.get(
-                "kodPocztowy",
-                ""
-            )
+            "Nr lokalu": nr_lokalu,
+
+            "Kod pocztowy": kod_pocztowy
         }
 
         return result, "OK"
@@ -207,19 +305,21 @@ uploaded_file = st.file_uploader(
     type=["csv"]
 )
 
+
 if uploaded_file is not None:
 
     try:
 
-        # -------------------------------------------------
+        # =================================================
         # WCZYTANIE CSV
-        # -------------------------------------------------
+        # =================================================
 
         df = pd.read_csv(
             uploaded_file,
             dtype=str
         )
 
+        # Usuwamy białe znaki z nazw kolumn
         df.columns = (
             df.columns
             .str.strip()
@@ -230,9 +330,9 @@ if uploaded_file is not None:
             f"{len(df)} rekordów."
         )
 
-        # -------------------------------------------------
-        # PODGLĄD
-        # -------------------------------------------------
+        # =================================================
+        # PODGLĄD CSV
+        # =================================================
 
         st.subheader("Kontrahenci")
 
@@ -241,9 +341,9 @@ if uploaded_file is not None:
             use_container_width=True
         )
 
-        # -------------------------------------------------
-        # SPRAWDZENIE NIP
-        # -------------------------------------------------
+        # =================================================
+        # WALIDACJA KOLUMNY NIP
+        # =================================================
 
         if "NIP" not in df.columns:
 
@@ -253,9 +353,9 @@ if uploaded_file is not None:
 
             st.stop()
 
-        # -------------------------------------------------
-        # PRZYCISK
-        # -------------------------------------------------
+        # =================================================
+        # PRZYCISK SCREENINGU KRS
+        # =================================================
 
         if st.button(
             "🔎 Sprawdź KRS",
@@ -270,17 +370,19 @@ if uploaded_file is not None:
 
             total = len(df)
 
-            # =============================================
-            # PĘTLA
-            # =============================================
+            # =================================================
+            # PĘTLA PO KONTRAHENTACH
+            # =================================================
 
             for i, row in df.iterrows():
+
+                # ---------------------------------------------
+                # NIP
+                # ---------------------------------------------
 
                 nip = str(
                     row["NIP"]
                 ).strip()
-
-                # Usuwamy spacje i myślniki
 
                 nip = (
                     nip
@@ -288,12 +390,20 @@ if uploaded_file is not None:
                     .replace("-", "")
                 )
 
+                # ---------------------------------------------
+                # NAZWA Z CSV
+                # ---------------------------------------------
+
                 nazwa_csv = str(
                     row.get(
                         "Nazwa",
                         ""
                     )
-                )
+                ).strip()
+
+                # ---------------------------------------------
+                # STATUS
+                # ---------------------------------------------
 
                 status_text.write(
                     f"Sprawdzanie "
@@ -301,9 +411,9 @@ if uploaded_file is not None:
                     f"— NIP: {nip}"
                 )
 
-                # -----------------------------------------
-                # REKORD WYNIKOWY
-                # -----------------------------------------
+                # ---------------------------------------------
+                # PUSTY REKORD WYNIKOWY
+                # ---------------------------------------------
 
                 result = {
 
@@ -317,7 +427,11 @@ if uploaded_file is not None:
 
                     "Forma prawna": "",
 
+                    "NIP KRS": "",
+
                     "REGON": "",
+
+                    "REGON KRS": "",
 
                     "Data rejestracji": "",
 
@@ -333,6 +447,8 @@ if uploaded_file is not None:
 
                     "Nr domu": "",
 
+                    "Nr lokalu": "",
+
                     "Kod pocztowy": "",
 
                     "Status MF": "",
@@ -340,9 +456,9 @@ if uploaded_file is not None:
                     "Status KRS": ""
                 }
 
-                # =========================================
-                # MF
-                # =========================================
+                # =================================================
+                # MF — NIP -> KRS
+                # =================================================
 
                 try:
 
@@ -356,19 +472,43 @@ if uploaded_file is not None:
                         mf_status
                     )
 
+                    # ---------------------------------------------
+                    # JEŻELI MF ZWRÓCIŁ DANE
+                    # ---------------------------------------------
+
                     if mf_data:
 
-                        krs = (
+                        krs = mf_data.get(
+                            "krs",
+                            ""
+                        )
+
+                        # -----------------------------------------
+                        # REGON Z MF
+                        # -----------------------------------------
+
+                        result["REGON"] = (
                             mf_data.get(
-                                "krs"
+                                "regon",
+                                ""
                             )
                         )
 
-                        # =================================
+                        # -----------------------------------------
                         # KRS
-                        # =================================
+                        # -----------------------------------------
+
+                        result["KRS"] = krs
+
+                        # -----------------------------------------
+                        # JEŻELI JEST KRS
+                        # -----------------------------------------
 
                         if krs:
+
+                            # =====================================
+                            # KRS API
+                            # =====================================
 
                             krs_data, krs_status = (
                                 get_krs_data(
@@ -379,6 +519,10 @@ if uploaded_file is not None:
                             result["Status KRS"] = (
                                 krs_status
                             )
+
+                            # -------------------------------------
+                            # PRZEPISANIE DANYCH KRS
+                            # -------------------------------------
 
                             if krs_data:
 
@@ -396,38 +540,53 @@ if uploaded_file is not None:
                                 "Brak numeru KRS"
                             )
 
+                    else:
+
+                        result["Status KRS"] = (
+                            "Nie znaleziono KRS"
+                        )
+
+                # =================================================
+                # BŁĄD
+                # =================================================
+
                 except Exception as e:
 
                     result["Status MF"] = (
                         f"BŁĄD: {e}"
                     )
 
-                # -----------------------------------------
-                # DODAJEMY WYNIK
-                # -----------------------------------------
+                # =================================================
+                # DODAJ WYNIK
+                # =================================================
 
                 results.append(
                     result
                 )
 
+                # =================================================
+                # PROGRESS
+                # =================================================
+
                 progress.progress(
                     (i + 1) / total
                 )
 
-            # =============================================
+            # =================================================
             # KONIEC
-            # =============================================
+            # =================================================
 
             progress.empty()
+
             status_text.empty()
 
             results_df = pd.DataFrame(
                 results
             )
 
-            # =============================================
+            # =================================================
             # WYNIKI
-            # =============================================
+            # =================================================
 
             st.subheader(
                 "Wyniki KRS"
@@ -436,46 +595,83 @@ if uploaded_file is not None:
             st.dataframe(
                 results_df,
                 use_container_width=True,
-                height=500
+                height=600
             )
 
-            # =============================================
+            # =================================================
             # STATYSTYKI
-            # =============================================
+            # =================================================
 
-            col1, col2, col3 = st.columns(3)
+            total_companies = len(
+                results_df
+            )
+
+            found_krs = (
+                results_df["KRS"]
+                .astype(str)
+                .str.strip()
+                .ne("")
+                .sum()
+            )
+
+            mf_errors = (
+                ~results_df[
+                    "Status MF"
+                ].eq("OK")
+            ).sum()
+
+            krs_errors = (
+                ~results_df[
+                    "Status KRS"
+                ].eq("OK")
+            ).sum()
+
+            # =================================================
+            # METRYKI
+            # =================================================
+
+            col1, col2, col3, col4 = (
+                st.columns(4)
+            )
 
             with col1:
 
                 st.metric(
                     "Kontrahenci",
-                    len(results_df)
+                    total_companies
                 )
 
             with col2:
 
                 st.metric(
                     "Znaleziono KRS",
-                    (
-                        results_df["KRS"]
-                        .astype(bool)
-                        .sum()
-                    )
+                    found_krs
                 )
 
             with col3:
 
                 st.metric(
                     "Błędy MF",
-                    (
-                        ~results_df[
-                            "Status MF"
-                        ].eq("OK")
-                    ).sum()
+                    mf_errors
                 )
 
-    except Exception as e:
+            with col4:
 
-        st.error(
-            f"Nie udało się odczytać pliku: {e}"
-        )
+                st.metric(
+                    "Błędy KRS",
+                    krs_errors
+                )
+
+            # =================================================
+            # DEBUG — OPCJONALNIE
+            # =================================================
+
+            with st.expander(
+                "🛠️ Debug — dane KRS"
+            ):
+
+                st.write(
+                    "Jeżeli jakieś pole KRS jest puste, "
+                    "tutaj będziemy mogli później "
+                    "podejrzeć strukturę odpowiedzi API."
+                )
