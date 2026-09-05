@@ -456,20 +456,57 @@ def get_krs_representation(krs):
 
         for osoba in sklad:
 
-            nazwisko = first_value(
-                osoba.get(
-                    "nazwisko"
-                ),
-                osoba.get(
-                    "nazwaLubFirma"
-                )
+            # KRS zwraca imię jako obiekt, np.:
+            # {"imie": "Jan", "imieDrugie": "Piotr"}
+            imie_data = osoba.get(
+                "imie",
+                ""
             )
 
-            imiona = first_value(
-                osoba.get(
-                    "imiona"
+            if isinstance(imie_data, dict):
+
+                imiona = " ".join(
+                    str(value).strip()
+                    for key, value in imie_data.items()
+                    if key.startswith("imie")
+                    and value is not None
+                    and str(value).strip()
                 )
+
+            else:
+
+                imiona = first_value(
+                    imie_data,
+                    osoba.get(
+                        "imiona"
+                    )
+                )
+
+            nazwisko_data = osoba.get(
+                "nazwiskoCzlon",
+                ""
             )
+
+            if isinstance(nazwisko_data, dict):
+
+                nazwisko = " ".join(
+                    str(value).strip()
+                    for value in nazwisko_data.values()
+                    if value is not None
+                    and str(value).strip()
+                )
+
+            else:
+
+                nazwisko = first_value(
+                    nazwisko_data,
+                    osoba.get(
+                        "nazwisko"
+                    ),
+                    osoba.get(
+                        "nazwaLubFirma"
+                    )
+                )
 
             funkcja = first_value(
                 osoba.get(
