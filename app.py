@@ -735,7 +735,7 @@ if uploaded_file is not None:
                     
                             representation_result, representation_status = (
                             get_krs_representation(
-                                krs
+                                    krs
                                 )
                             )
                     
