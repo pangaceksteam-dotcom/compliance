@@ -1241,26 +1241,67 @@ def check_giif_sanctions(
 def get_eu_sanctions():
 
     # Oficjalny publiczny plik CSV EU Financial Sanctions File.
-    url = (
-        "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-        "csvFullSanctionsList_1_1/content"
-        "?token=dG9rZW4tMjAxNw"
-    )
+    urls = [
+        (
+            "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
+            "csvFullSanctionsList_1_1/content"
+            "?token=dG9rZW4tMjAxNw"
+        ),
+        (
+            "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
+            "csvFullSanctionsList_1_1/content"
+        )
+    ]
 
     try:
 
-        response = requests.get(
-            url,
-            timeout=60,
-            headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
+        response = None
 
-        if response.status_code != 200:
+        last_status = ""
+
+        # EU FSF bywa chwilowo niedostępny z pojedynczego endpointu.
+        # Próbujemy oficjalnego adresu z tokenem oraz wariantu bez tokena.
+        for url in urls:
+
+            try:
+
+                candidate = requests.get(
+                    url,
+                    timeout=60,
+                    headers={
+                        "User-Agent": (
+                            "Mozilla/5.0 "
+                            "(Windows NT 10.0; Win64; x64)"
+                        ),
+                        "Accept": (
+                            "text/csv,application/csv,"
+                            "application/octet-stream,*/*"
+                        ),
+                        "Referer": (
+                            "https://webgate.ec.europa.eu/fsd/fsf/"
+                        )
+                    }
+                )
+
+                last_status = (
+                    f"HTTP {candidate.status_code}"
+                )
+
+                if candidate.status_code == 200:
+
+                    response = candidate
+
+                    break
+
+            except Exception as e:
+
+                last_status = str(e)
+
+        if response is None:
 
             return None, (
-                f"UE FSF HTTP {response.status_code}"
+                "UE FSF — serwer listy nie odpowiedział "
+                "poprawnie (" + last_status + ")"
             )
 
         from io import BytesIO
