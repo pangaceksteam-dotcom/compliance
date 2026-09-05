@@ -920,6 +920,155 @@ def check_mswiA_sanctions(
 
 
 # =========================================================
+# GIIF - KRAJOWA LISTA SANKCYJNA
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def get_giif_sanctions():
+
+    # Oficjalny plik XLSX publikowany przez Ministerstwo Finansów / GIIF.
+    url = (
+        "https://www.gov.pl/attachment/"
+        "56238b34-8a26-4431-a05a-e1d039f0defa"
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        if response.status_code != 200:
+
+            return None, (
+                f"GIIF HTTP {response.status_code}"
+            )
+
+        from io import BytesIO
+
+        try:
+
+            giif = pd.read_excel(
+                BytesIO(
+                    response.content
+                )
+            )
+
+        except ImportError:
+
+            return None, (
+                "GIIF: brak biblioteki openpyxl. "
+                "W terminalu wykonaj: pip install openpyxl"
+            )
+
+        except Exception as e:
+
+            return None, (
+                f"GIIF — błąd odczytu XLSX: {e}"
+            )
+
+        if giif.empty:
+
+            return None, (
+                "GIIF — pobrany plik jest pusty"
+            )
+
+        giif.columns = [
+            str(column).strip()
+            for column in giif.columns
+        ]
+
+        return giif, "OK"
+
+    except Exception as e:
+
+        return None, (
+            f"Błąd pobierania listy GIIF: {e}"
+        )
+
+
+def check_giif_sanctions(
+    name,
+    nip,
+    krs
+):
+
+    sanctions, status = (
+        get_giif_sanctions()
+    )
+
+    if sanctions is None:
+
+        return None, status
+
+    name_norm = normalize_text(
+        name
+    )
+
+    nip_norm = normalize_text(
+        nip
+    )
+
+    krs_norm = normalize_text(
+        krs
+    )
+
+    for _, row in sanctions.iterrows():
+
+        row_values = [
+            str(value)
+            for value in row.tolist()
+            if pd.notna(value)
+        ]
+
+        row_text = " ".join(
+            row_values
+        )
+
+        row_norm = normalize_text(
+            row_text
+        )
+
+        if nip_norm and nip_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NIP",
+                "wpis": row.to_dict()
+            }, "OK"
+
+        if krs_norm and krs_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "KRS",
+                "wpis": row.to_dict()
+            }, "OK"
+
+        if (
+            name_norm
+            and len(name_norm) >= 5
+            and name_norm in row_norm
+        ):
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NAZWA",
+                "wpis": row.to_dict()
+            }, "OK"
+
+    return {
+        "status": "NIE ZNALEZIONO",
+        "powod": "",
+        "wpis": {}
+    }, "OK"
+
+
+# =========================================================
 # UPLOAD CSV
 # =========================================================
 
@@ -1087,7 +1236,11 @@ if uploaded_file is not None:
 
                     "MSWiA sankcje": "",
 
-                    "MSWiA dopasowanie": ""
+                    "MSWiA dopasowanie": "",
+
+                    "GIIF sankcje": "",
+
+                    "GIIF dopasowanie": ""
                 }
 
                 # =================================================
@@ -1231,6 +1384,50 @@ if uploaded_file is not None:
 
                                 result["MSWiA dopasowanie"] = (
                                     mswia_result.get(
+                                        "powod",
+                                        ""
+                                    )
+                                )
+
+                            # -------------------------------------
+                            # SCREENING GIIF
+                            # -------------------------------------
+
+                            giif_result, giif_status = (
+                                check_giif_sanctions(
+                                    result.get(
+                                        "Nazwa KRS",
+                                        ""
+                                    ),
+                                    result.get(
+                                        "NIP KRS",
+                                        ""
+                                    ),
+                                    krs
+                                )
+                            )
+
+                            if giif_result is None:
+
+                                result["GIIF sankcje"] = (
+                                    "BŁĄD"
+                                )
+
+                                result["GIIF dopasowanie"] = (
+                                    giif_status
+                                )
+
+                            else:
+
+                                result["GIIF sankcje"] = (
+                                    giif_result.get(
+                                        "status",
+                                        ""
+                                    )
+                                )
+
+                                result["GIIF dopasowanie"] = (
+                                    giif_result.get(
                                         "powod",
                                         ""
                                     )
