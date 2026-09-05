@@ -643,15 +643,100 @@ def get_mswiA_sanctions():
                 f"MSWiA HTTP {response.status_code}"
             )
 
-        from io import StringIO
+        # Nie używamy pd.read_html(), ponieważ wymaga zewnętrznego
+        # parsera HTML (np. lxml), którego Streamlit może nie mieć.
+        # Używamy standardowej biblioteki Pythona.
 
-        tables = pd.read_html(
-            StringIO(
-                response.text
-            )
+        from html.parser import HTMLParser
+
+        class TableParser(HTMLParser):
+
+            def __init__(self):
+
+                super().__init__()
+
+                self.tables = []
+                self.current_table = None
+                self.current_row = None
+                self.current_cell = None
+                self.cell_text = ""
+
+            def handle_starttag(self, tag, attrs):
+
+                if tag == "table":
+
+                    self.current_table = []
+
+                elif (
+                    self.current_table is not None
+                    and tag == "tr"
+                ):
+
+                    self.current_row = []
+
+                elif (
+                    self.current_row is not None
+                    and tag in ("td", "th")
+                ):
+
+                    self.current_cell = tag
+                    self.cell_text = ""
+
+            def handle_data(self, data):
+
+                if self.current_cell is not None:
+
+                    self.cell_text += data
+
+            def handle_endtag(self, tag):
+
+                if (
+                    self.current_cell is not None
+                    and tag in ("td", "th")
+                ):
+
+                    self.current_row.append(
+                        " ".join(
+                            self.cell_text.split()
+                        )
+                    )
+
+                    self.current_cell = None
+                    self.cell_text = ""
+
+                elif (
+                    tag == "tr"
+                    and self.current_row is not None
+                ):
+
+                    if self.current_row:
+
+                        self.current_table.append(
+                            self.current_row
+                        )
+
+                    self.current_row = None
+
+                elif (
+                    tag == "table"
+                    and self.current_table is not None
+                ):
+
+                    if self.current_table:
+
+                        self.tables.append(
+                            self.current_table
+                        )
+
+                    self.current_table = None
+
+        parser = TableParser()
+
+        parser.feed(
+            response.text
         )
 
-        if not tables:
+        if not parser.tables:
 
             return None, (
                 "MSWiA — nie znaleziono tabel"
@@ -659,17 +744,57 @@ def get_mswiA_sanctions():
 
         frames = []
 
-        for table in tables:
+        for rows in parser.tables:
 
-            table = table.copy()
+            if len(rows) < 2:
+                continue
 
-            table.columns = [
-                str(column).strip()
-                for column in table.columns
+            headers = rows[0]
+
+            # Uzupełniamy brakujące nagłówki.
+            headers = [
+                header
+                if header
+                else f"Kolumna_{i + 1}"
+                for i, header in enumerate(headers)
             ]
 
-            frames.append(
-                table
+            data_rows = []
+
+            for row in rows[1:]:
+
+                # Wyrównanie liczby kolumn.
+                row = list(row)
+
+                if len(row) < len(headers):
+
+                    row.extend(
+                        [""] * (
+                            len(headers) - len(row)
+                        )
+                    )
+
+                elif len(row) > len(headers):
+
+                    row = row[:len(headers)]
+
+                data_rows.append(
+                    row
+                )
+
+            if data_rows:
+
+                frames.append(
+                    pd.DataFrame(
+                        data_rows,
+                        columns=headers
+                    )
+                )
+
+        if not frames:
+
+            return None, (
+                "MSWiA — nie udało się odczytać danych"
             )
 
         sanctions = pd.concat(
