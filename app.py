@@ -451,6 +451,9 @@ def get_krs_representation(krs):
 
         osoby = []
 
+        if isinstance(sklad, dict):
+            sklad = [sklad]
+
         for osoba in sklad:
 
             nazwisko = first_value(
@@ -661,7 +664,9 @@ if uploaded_file is not None:
 
                     "Status KRS": "",
 
-                    "Sposób reprezentacji": ""
+                    "Sposób reprezentacji": "",
+
+                    "Osoby reprezentujące": ""
                 }
 
                 # =================================================
@@ -738,6 +743,31 @@ if uploaded_file is not None:
                                     representation_result.get(
                                         "Sposób reprezentacji",
                                         ""
+                                    )
+                                )
+
+                                osoby = representation_result.get(
+                                    "Osoby reprezentujące",
+                                    []
+                                )
+
+                                result["Osoby reprezentujące"] = (
+                                    "; ".join(
+                                        first_value(
+                                            osoba.get("Imiona"),
+                                            ""
+                                        )
+                                        + " "
+                                        + first_value(
+                                            osoba.get("Nazwisko"),
+                                            ""
+                                        )
+                                        + " — "
+                                        + first_value(
+                                            osoba.get("Funkcja"),
+                                            ""
+                                        )
+                                        for osoba in osoby
                                     )
                                 )
 
