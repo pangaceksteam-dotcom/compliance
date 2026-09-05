@@ -659,7 +659,9 @@ if uploaded_file is not None:
 
                     "Status MF": "",
 
-                    "Status KRS": ""
+                    "Status KRS": "",
+
+                    "Sposób reprezentacji": ""
                 }
 
                 # =================================================
@@ -720,9 +722,24 @@ if uploaded_file is not None:
                                 )
                             )
 
+                            representation_result, representation_status = (
+                                get_krs_representation(
+                                    krs
+                                )
+                            )
+
                             result["Status KRS"] = (
                                 krs_status
                             )
+
+                            if representation_result is not None:
+
+                                result["Sposób reprezentacji"] = (
+                                    representation_result.get(
+                                        "Sposób reprezentacji",
+                                        ""
+                                    )
+                                )
 
 
                             # -------------------------------------
