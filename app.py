@@ -1,6 +1,9 @@
 import streamlit as st
 import pandas as pd
 import requests
+import os
+import re
+import xml.etree.ElementTree as ET
 from datetime import date
 
 
@@ -16,6 +19,26 @@ st.set_page_config(
 
 st.title("🔎 Sanctions Screening")
 st.write("Wgraj plik CSV z kontrahentami.")
+
+
+# =========================================================
+# EU FSF - TOKEN
+# =========================================================
+
+with st.sidebar:
+
+    st.header("🇪🇺 EU FSF")
+
+    eu_token_manual = st.text_input(
+        "Token EU FSF (opcjonalnie)",
+        type="password",
+        help=(
+            "Token pobierania EU Financial Sanctions File. "
+            "Możesz też ustawić EU_FSF_TOKEN w Streamlit Secrets. "
+            "Jeżeli oba są ustawione, użyty zostanie token wpisany tutaj."
+        )
+    ).strip()
+
 
 
 # =========================================================
@@ -1237,127 +1260,308 @@ def check_giif_sanctions(
 # UE - SKONSOLIDOWANA LISTA SANKCJI FINANSOWYCH
 # =========================================================
 
-@st.cache_data(ttl=3600)
-def get_eu_sanctions():
+EU_FSF_CSV_URL = (
+    "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
+    "csvFullSanctionsList_1_1/content"
+)
 
-    # Oficjalny publiczny plik CSV EU Financial Sanctions File.
-    urls = [
-        (
-            "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-            "csvFullSanctionsList_1_1/content"
-            "?token=dG9rZW4tMjAxNw"
-        ),
-        (
-            "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
-            "csvFullSanctionsList_1_1/content"
-        )
-    ]
+EU_FSF_XML_URL = (
+    "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
+    "xmlFullSanctionsList_1_1/content"
+)
+
+
+def get_eu_fsf_token():
+
+    """
+    Pobiera token EU FSF z:
+    1. Streamlit Secrets: EU_FSF_TOKEN
+    2. zmiennej środowiskowej: EU_FSF_TOKEN
+
+    Token można też wkleić ręcznie w sidebarze.
+    """
+
+    token = ""
 
     try:
 
-        response = None
+        token = st.secrets.get(
+            "EU_FSF_TOKEN",
+            ""
+        )
 
-        last_status = ""
+    except Exception:
 
-        # EU FSF bywa chwilowo niedostępny z pojedynczego endpointu.
-        # Próbujemy oficjalnego adresu z tokenem oraz wariantu bez tokena.
-        for url in urls:
+        token = ""
 
-            try:
+    if not token:
 
-                candidate = requests.get(
-                    url,
-                    timeout=60,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 "
-                            "(Windows NT 10.0; Win64; x64)"
-                        ),
-                        "Accept": (
-                            "text/csv,application/csv,"
-                            "application/octet-stream,*/*"
-                        ),
-                        "Referer": (
-                            "https://webgate.ec.europa.eu/fsd/fsf/"
-                        )
-                    }
+        token = os.getenv(
+            "EU_FSF_TOKEN",
+            ""
+        )
+
+    token = str(token).strip()
+
+    # Użytkownik może wkleić sam token albo cały parametr URL.
+    if "token=" in token:
+
+        token = token.split(
+            "token=",
+            1
+        )[1]
+
+        token = token.split(
+            "&",
+            1
+        )[0]
+
+    return token.strip()
+
+
+def parse_eu_csv(content):
+
+    from io import BytesIO
+
+    try:
+
+        eu = pd.read_csv(
+            BytesIO(content),
+            sep=";",
+            dtype=str,
+            keep_default_na=False
+        )
+
+    except UnicodeDecodeError:
+
+        eu = pd.read_csv(
+            BytesIO(content),
+            sep=";",
+            dtype=str,
+            encoding="latin-1",
+            keep_default_na=False
+        )
+
+    if eu.empty:
+
+        raise ValueError(
+            "plik CSV jest pusty"
+        )
+
+    eu.columns = [
+        str(column).strip()
+        for column in eu.columns
+    ]
+
+    return eu
+
+
+def parse_eu_xml(content):
+
+    """
+    Awaryjny parser XML 1.1.
+
+    Nie zakładamy sztywnego namespace ani konkretnej kolejności pól.
+    Dla każdego elementu Entity zbieramy wszystkie wartości tekstowe
+    znajdujące się w jego poddrzewie. Dzięki temu screening może działać
+    również wtedy, gdy Komisja zmieni kolejność lub namespace XML.
+    """
+
+    root = ET.fromstring(content)
+
+    rows = []
+
+    for entity in root.iter():
+
+        local_name = entity.tag.split(
+            "}",
+            1
+        )[-1]
+
+        if local_name.lower() != "entity":
+            continue
+
+        values = []
+
+        for element in entity.iter():
+
+            text = (element.text or "").strip()
+
+            if text:
+
+                values.append(text)
+
+            for attr_value in element.attrib.values():
+
+                attr_value = str(attr_value).strip()
+
+                if attr_value:
+
+                    values.append(attr_value)
+
+        # Usuwamy duplikaty przy zachowaniu kolejności.
+        values = list(
+            dict.fromkeys(values)
+        )
+
+        if not values:
+            continue
+
+        row = {
+            "EU Entity": entity.attrib.get(
+                "euReferenceNumber",
+                entity.attrib.get(
+                    "ID",
+                    ""
                 )
+            ),
+            "_EU row text": " ".join(values)
+        }
 
-                last_status = (
-                    f"HTTP {candidate.status_code}"
-                )
+        rows.append(row)
 
-                if candidate.status_code == 200:
+    if not rows:
 
-                    response = candidate
+        raise ValueError(
+            "w XML nie znaleziono elementów Entity"
+        )
 
-                    break
+    return pd.DataFrame(rows)
 
-            except Exception as e:
 
-                last_status = str(e)
+@st.cache_data(ttl=3600)
+def get_eu_sanctions(token):
 
-        if response is None:
+    """
+    Oficjalna EU Financial Sanctions File (FSF).
 
-            return None, (
-                "UE FSF — serwer listy nie odpowiedział "
-                "poprawnie (" + last_status + ")"
-            )
+    Aktualny endpoint FSF wymaga tokenu pobierania. Token jest bezpłatny
+    i można go uzyskać przez EU Login / konto FSF. Aplikacja nie używa
+    agregatora typu OpenSanctions jako zastępczego źródła.
 
-        from io import BytesIO
+    Próby pobrania:
+    1. CSV 1.1 z tokenem
+    2. XML 1.1 z tokenem
+    """
+
+    token = str(token or "").strip()
+
+    if not token:
+
+        return None, (
+            "UE FSF — wymagany token pobierania. "
+            "Ustaw EU_FSF_TOKEN w Streamlit Secrets / zmiennej środowiskowej "
+            "albo wklej token w panelu bocznym."
+        )
+
+    urls = [
+
+        (
+            EU_FSF_CSV_URL
+            + "?token="
+            + token,
+            "CSV"
+        ),
+
+        (
+            EU_FSF_XML_URL
+            + "?token="
+            + token,
+            "XML"
+        )
+    ]
+
+    headers = {
+
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "Chrome/140.0 Safari/537.36"
+        ),
+
+        "Accept": (
+            "text/csv,application/csv,"
+            "application/xml,text/xml,"
+            "application/octet-stream,*/*"
+        ),
+
+        "Referer": (
+            "https://webgate.ec.europa.eu/fsd/fsf/"
+        )
+    }
+
+    last_error = ""
+
+    for url, file_type in urls:
 
         try:
 
-            # FSF CSV używa średnika jako separatora.
-            eu = pd.read_csv(
-                BytesIO(
+            response = requests.get(
+                url,
+                timeout=90,
+                headers=headers
+            )
+
+        except requests.RequestException as e:
+
+            last_error = (
+                f"{file_type}: {e}"
+            )
+
+            continue
+
+        if response.status_code != 200:
+
+            last_error = (
+                f"{file_type}: HTTP "
+                f"{response.status_code}"
+            )
+
+            continue
+
+        try:
+
+            if file_type == "CSV":
+
+                eu = parse_eu_csv(
                     response.content
-                ),
-                sep=";",
-                dtype=str,
-                keep_default_na=False
-            )
+                )
 
-        except UnicodeDecodeError:
+            else:
 
-            eu = pd.read_csv(
-                BytesIO(
+                eu = parse_eu_xml(
                     response.content
-                ),
-                sep=";",
-                dtype=str,
-                encoding="latin-1",
-                keep_default_na=False
+                )
+
+            return eu, (
+                f"OK — EU FSF {file_type}"
             )
 
-        if eu.empty:
+        except Exception as e:
 
-            return None, (
-                "UE FSF — pobrany plik jest pusty"
+            last_error = (
+                f"{file_type}: błąd parsowania — {e}"
             )
 
-        eu.columns = [
-            str(column).strip()
-            for column in eu.columns
-        ]
-
-        return eu, "OK"
-
-    except Exception as e:
-
-        return None, (
-            f"Błąd pobierania listy UE: {e}"
-        )
+    return None, (
+        "UE FSF — nie udało się pobrać listy. "
+        + last_error
+        + ". Sprawdź, czy token jest aktualny."
+    )
 
 
 def check_eu_sanctions(
     name,
     nip,
-    krs
+    krs,
+    token
 ):
 
     sanctions, status = (
-        get_eu_sanctions()
+        get_eu_sanctions(
+            token
+        )
     )
 
     if sanctions is None:
@@ -1376,17 +1580,30 @@ def check_eu_sanctions(
         krs
     )
 
+    # Dla XML 1.1 mamy przygotowaną jedną kolumnę z pełną treścią
+    # danego Entity. Dla CSV budujemy tekst z całego rekordu.
     for _, row in sanctions.iterrows():
 
-        row_values = [
-            str(value)
-            for value in row.tolist()
-            if pd.notna(value)
-        ]
+        if "_EU row text" in sanctions.columns:
 
-        row_text = " ".join(
-            row_values
-        )
+            row_text = str(
+                row.get(
+                    "_EU row text",
+                    ""
+                )
+            )
+
+        else:
+
+            row_values = [
+                str(value)
+                for value in row.tolist()
+                if pd.notna(value)
+            ]
+
+            row_text = " ".join(
+                row_values
+            )
 
         row_norm = normalize_text(
             row_text
@@ -1398,7 +1615,7 @@ def check_eu_sanctions(
                 "status": "ZNALEZIONO",
                 "powod": "NIP",
                 "wpis": row.to_dict()
-            }, "OK"
+            }, status
 
         if krs_norm and krs_norm in row_norm:
 
@@ -1406,7 +1623,7 @@ def check_eu_sanctions(
                 "status": "ZNALEZIONO",
                 "powod": "KRS",
                 "wpis": row.to_dict()
-            }, "OK"
+            }, status
 
         if (
             name_norm
@@ -1418,14 +1635,17 @@ def check_eu_sanctions(
                 "status": "ZNALEZIONO",
                 "powod": "NAZWA",
                 "wpis": row.to_dict()
-            }, "OK"
+            }, status
 
     return {
         "status": "NIE ZNALEZIONO",
         "powod": "",
         "wpis": {}
-    }, "OK"
+    }, status
 
+
+# Token ręczny ma pierwszeństwo przed Secrets / ENV.
+eu_fsf_token = eu_token_manual or get_eu_fsf_token()
 
 
 # =========================================================
@@ -1811,7 +2031,8 @@ if uploaded_file is not None:
                                         "NIP KRS",
                                         ""
                                     ),
-                                    krs
+                                    krs,
+                                    eu_fsf_token
                                 )
                             )
 
