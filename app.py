@@ -725,23 +725,6 @@ if uploaded_file is not None:
                             )
 
 
-                            if krs:
-
-                            krs_data, raw_json, krs_status = (
-                            get_krs_data(
-                                    krs
-                                )
-                            )
-                    
-                            representation_result, representation_status = (
-                            get_krs_representation(
-                                    krs
-                                )
-                            )
-                    
-                            result["Status KRS"] = (
-                                krs_status
-                            )
                             # -------------------------------------
                             # DEBUG JSON
                             # -------------------------------------
