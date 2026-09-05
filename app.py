@@ -584,6 +584,217 @@ def get_krs_representation(krs):
 
         return None, f"Błąd parsowania reprezentacji: {e}"
 # =========================================================
+# MSWiA - LISTA SANKCYJNA
+# =========================================================
+
+def normalize_text(value):
+
+    if value is None:
+        return ""
+
+    import unicodedata
+    import re
+
+    value = str(value).upper().strip()
+
+    value = unicodedata.normalize(
+        "NFKD",
+        value
+    )
+
+    value = "".join(
+        char
+        for char in value
+        if not unicodedata.combining(char)
+    )
+
+    value = re.sub(
+        r"[^A-Z0-9]+",
+        " ",
+        value
+    )
+
+    return " ".join(
+        value.split()
+    )
+
+
+@st.cache_data(ttl=3600)
+def get_mswiA_sanctions():
+
+    url = (
+        "https://www.gov.pl/web/mswia/"
+        "lista-osob-i-podmiotow-objetych-sankcjami"
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            timeout=30,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        if response.status_code != 200:
+
+            return None, (
+                f"MSWiA HTTP {response.status_code}"
+            )
+
+        from io import StringIO
+
+        tables = pd.read_html(
+            StringIO(
+                response.text
+            )
+        )
+
+        if not tables:
+
+            return None, (
+                "MSWiA — nie znaleziono tabel"
+            )
+
+        frames = []
+
+        for table in tables:
+
+            table = table.copy()
+
+            table.columns = [
+                str(column).strip()
+                for column in table.columns
+            ]
+
+            frames.append(
+                table
+            )
+
+        sanctions = pd.concat(
+            frames,
+            ignore_index=True
+        )
+
+        return sanctions, "OK"
+
+    except Exception as e:
+
+        return None, (
+            f"Błąd pobierania listy MSWiA: {e}"
+        )
+
+
+def check_mswiA_sanctions(
+    name,
+    nip,
+    krs
+):
+
+    sanctions, status = (
+        get_mswiA_sanctions()
+    )
+
+    if sanctions is None:
+
+        return None, status
+
+    name_norm = normalize_text(
+        name
+    )
+
+    nip_norm = normalize_text(
+        nip
+    )
+
+    krs_norm = normalize_text(
+        krs
+    )
+
+    for _, row in sanctions.iterrows():
+
+        row_values = [
+            str(value)
+            for value in row.tolist()
+            if pd.notna(value)
+        ]
+
+        row_text = " ".join(
+            row_values
+        )
+
+        row_norm = normalize_text(
+            row_text
+        )
+
+        # Pomijamy wpisy wykreślone z listy,
+        # jeżeli tabela zawiera datę wykreślenia.
+        deleted = False
+
+        for column in sanctions.columns:
+
+            column_norm = normalize_text(
+                column
+            )
+
+            if "DATA WYKRESLENIA" in column_norm:
+
+                value = row.get(
+                    column,
+                    ""
+                )
+
+                if pd.notna(value) and str(
+                    value
+                ).strip():
+
+                    deleted = True
+
+                    break
+
+        if deleted:
+            continue
+
+        # Najpierw najmocniejsze identyfikatory:
+        # NIP lub KRS.
+        if nip_norm and nip_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NIP",
+                "wpis": row.to_dict()
+            }, "OK"
+
+        if krs_norm and krs_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "KRS",
+                "wpis": row.to_dict()
+            }, "OK"
+
+        # Nazwę traktujemy jako słabsze dopasowanie.
+        if (
+            name_norm
+            and len(name_norm) >= 5
+            and name_norm in row_norm
+        ):
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NAZWA",
+                "wpis": row.to_dict()
+            }, "OK"
+
+    return {
+        "status": "NIE ZNALEZIONO",
+        "powod": "",
+        "wpis": {}
+    }, "OK"
+
+
+# =========================================================
 # UPLOAD CSV
 # =========================================================
 
@@ -747,7 +958,11 @@ if uploaded_file is not None:
 
                     "Sposób reprezentacji": "",
 
-                    "Osoby reprezentujące": ""
+                    "Osoby reprezentujące": "",
+
+                    "MSWiA sankcje": "",
+
+                    "MSWiA dopasowanie": ""
                 }
 
                 # =================================================
@@ -849,6 +1064,50 @@ if uploaded_file is not None:
                                             ""
                                         )
                                         for osoba in osoby
+                                    )
+                                )
+
+                            # -------------------------------------
+                            # SCREENING MSWiA
+                            # -------------------------------------
+
+                            mswia_result, mswia_status = (
+                                check_mswiA_sanctions(
+                                    result.get(
+                                        "Nazwa KRS",
+                                        ""
+                                    ),
+                                    result.get(
+                                        "NIP KRS",
+                                        ""
+                                    ),
+                                    krs
+                                )
+                            )
+
+                            if mswia_result is None:
+
+                                result["MSWiA sankcje"] = (
+                                    "BŁĄD"
+                                )
+
+                                result["MSWiA dopasowanie"] = (
+                                    mswia_status
+                                )
+
+                            else:
+
+                                result["MSWiA sankcje"] = (
+                                    mswia_result.get(
+                                        "status",
+                                        ""
+                                    )
+                                )
+
+                                result["MSWiA dopasowanie"] = (
+                                    mswia_result.get(
+                                        "powod",
+                                        ""
                                     )
                                 )
 
