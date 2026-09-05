@@ -456,66 +456,110 @@ def get_krs_representation(krs):
 
         for osoba in sklad:
 
-            # KRS zwraca imię jako obiekt, np.:
-            # {"imie": "Jan", "imieDrugie": "Piotr"}
-            imie_data = osoba.get(
-                "imie",
-                ""
-            )
+            # KRS może zwracać pola osoby jako zagnieżdżone słowniki.
+            # Sprowadzamy je zawsze do zwykłego tekstu.
 
-            if isinstance(imie_data, dict):
+            def text_from_value(value):
 
-                imiona = " ".join(
-                    str(value).strip()
-                    for key, value in imie_data.items()
-                    if key.startswith("imie")
-                    and value is not None
-                    and str(value).strip()
-                )
+                if value is None:
+                    return ""
 
-            else:
+                if isinstance(value, dict):
 
-                imiona = first_value(
-                    imie_data,
-                    osoba.get(
-                        "imiona"
-                    )
-                )
-
-            nazwisko_data = osoba.get(
-                "nazwiskoCzlon",
-                ""
-            )
-
-            if isinstance(nazwisko_data, dict):
-
-                nazwisko = " ".join(
-                    str(value).strip()
-                    for value in nazwisko_data.values()
-                    if value is not None
-                    and str(value).strip()
-                )
-
-            else:
-
-                nazwisko = first_value(
-                    nazwisko_data,
-                    osoba.get(
-                        "nazwisko"
-                    ),
-                    osoba.get(
+                    # Najpierw próbujemy typowych pól osobowych.
+                    preferred_keys = [
+                        "imie",
+                        "imiePierwsze",
+                        "imieDrugie",
+                        "nazwisko",
+                        "nazwiskoCzlon",
                         "nazwaLubFirma"
-                    )
+                    ]
+
+                    values = []
+
+                    for key in preferred_keys:
+
+                        if key in value:
+
+                            extracted = text_from_value(
+                                value.get(key)
+                            )
+
+                            if extracted:
+                                values.append(extracted)
+
+                    if values:
+                        return " ".join(dict.fromkeys(values))
+
+                    # Fallback dla innych struktur.
+                    values = []
+
+                    for value_item in value.values():
+
+                        extracted = text_from_value(
+                            value_item
+                        )
+
+                        if extracted:
+                            values.append(extracted)
+
+                    return " ".join(dict.fromkeys(values))
+
+                if isinstance(value, list):
+
+                    values = []
+
+                    for item in value:
+
+                        extracted = text_from_value(item)
+
+                        if extracted:
+                            values.append(extracted)
+
+                    return " ".join(values)
+
+                return str(value).strip()
+
+            # Jeżeli dane osoby są dodatkowo zagnieżdżone,
+            # spróbujmy najpierw znaleźć właściwy obiekt.
+            osoba_data = osoba
+
+            if isinstance(osoba_data.get("osoba"), dict):
+
+                osoba_data = osoba_data.get("osoba")
+
+            imiona = text_from_value(
+                osoba_data.get("imie")
+            )
+
+            if not imiona:
+                imiona = text_from_value(
+                    osoba_data.get("imiona")
                 )
 
-            funkcja = first_value(
-                osoba.get(
-                    "funkcjaWOrganie"
-                ),
-                osoba.get(
-                    "funkcja"
-                )
+            nazwisko = text_from_value(
+                osoba_data.get("nazwiskoCzlon")
             )
+
+            if not nazwisko:
+                nazwisko = text_from_value(
+                    osoba_data.get("nazwisko")
+                )
+
+            if not nazwisko:
+                nazwisko = text_from_value(
+                    osoba_data.get("nazwaLubFirma")
+                )
+
+            funkcja = text_from_value(
+                osoba.get("funkcjaWOrganie")
+            )
+
+            if not funkcja:
+                funkcja = text_from_value(
+                    osoba.get("funkcja")
+                )
 
             osoby.append({
                 "Nazwisko": nazwisko,
