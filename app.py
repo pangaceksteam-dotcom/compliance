@@ -1240,16 +1240,18 @@ def check_giif_sanctions(
 @st.cache_data(ttl=3600)
 def get_eu_sanctions():
 
-    # Oficjalna strona Komisji Europejskiej / FSF.
-    page_url = (
-        "https://webgate.ec.europa.eu/fsd/fsf/"
+    # Oficjalny publiczny plik CSV EU Financial Sanctions File.
+    url = (
+        "https://webgate.ec.europa.eu/fsd/fsf/public/files/"
+        "csvFullSanctionsList_1_1/content"
+        "?token=dG9rZW4tMjAxNw"
     )
 
     try:
 
         response = requests.get(
-            page_url,
-            timeout=30,
+            url,
+            timeout=60,
             headers={
                 "User-Agent": "Mozilla/5.0"
             }
@@ -1261,235 +1263,36 @@ def get_eu_sanctions():
                 f"UE FSF HTTP {response.status_code}"
             )
 
-        # Szukamy bezpośrednich plików CSV/XML.
-        from html.parser import HTMLParser
-        from urllib.parse import urljoin
+        from io import BytesIO
 
-        class LinkParser(HTMLParser):
+        try:
 
-            def __init__(self):
-
-                super().__init__()
-
-                self.links = []
-
-            def handle_starttag(
-                self,
-                tag,
-                attrs
-            ):
-
-                if tag.lower() != "a":
-                    return
-
-                attributes = dict(attrs)
-
-                href = attributes.get(
-                    "href",
-                    ""
-                )
-
-                text = ""
-
-                self.links.append(
-                    {
-                        "href": href,
-                        "text": text
-                    }
-                )
-
-                self.current_link = (
-                    self.links[-1]
-                )
-
-            def handle_data(self, data):
-
-                if hasattr(
-                    self,
-                    "current_link"
-                ):
-
-                    self.current_link["text"] += (
-                        " " + data.strip()
-                    )
-
-            def handle_endtag(self, tag):
-
-                if (
-                    tag.lower() == "a"
-                    and hasattr(
-                        self,
-                        "current_link"
-                    )
-                ):
-
-                    self.current_link["text"] = (
-                        self.current_link["text"].strip()
-                    )
-
-                    del self.current_link
-
-        parser = LinkParser()
-
-        parser.feed(
-            response.text
-        )
-
-        candidates = []
-
-        for link in parser.links:
-
-            href = link.get(
-                "href",
-                ""
+            # FSF CSV używa średnika jako separatora.
+            eu = pd.read_csv(
+                BytesIO(
+                    response.content
+                ),
+                sep=";",
+                dtype=str,
+                keep_default_na=False
             )
 
-            label = link.get(
-                "text",
-                ""
-            )
+        except UnicodeDecodeError:
 
-            combined = (
-                href + " " + label
-            ).lower()
-
-            if (
-                ".csv" in combined
-                or ".xml" in combined
-            ):
-
-                candidates.append(
-                    urljoin(
-                        page_url,
-                        href
-                    )
-                )
-
-        candidates = list(
-            dict.fromkeys(
-                candidates
-            )
-        )
-
-        # Preferujemy CSV, bo najłatwiej go przetworzyć.
-        candidates = sorted(
-            candidates,
-            key=lambda url: (
-                0 if ".csv" in url.lower()
-                else 1
-            )
-        )
-
-        file_response = None
-        file_url = ""
-
-        for candidate in candidates:
-
-            try:
-
-                candidate_response = requests.get(
-                    candidate,
-                    timeout=30,
-                    headers={
-                        "User-Agent": "Mozilla/5.0"
-                    }
-                )
-
-                if candidate_response.status_code == 200:
-
-                    file_response = candidate_response
-                    file_url = candidate
-
-                    break
-
-            except Exception:
-
-                continue
-
-        if file_response is None:
-
-            return None, (
-                "UE — nie znaleziono lub nie udało się "
-                "pobrać pliku CSV/XML"
-            )
-
-        from io import BytesIO, StringIO
-
-        if ".csv" in file_url.lower():
-
-            content = file_response.content
-
-            try:
-
-                eu = pd.read_csv(
-                    BytesIO(content),
-                    dtype=str
-                )
-
-            except Exception:
-
-                eu = pd.read_csv(
-                    BytesIO(content),
-                    dtype=str,
-                    encoding="latin-1"
-                )
-
-        else:
-
-            # XML zachowujemy jako tekst. Parser poniżej
-            # zamieni elementy XML na tabelę rekordów.
-            import xml.etree.ElementTree as ET
-
-            root = ET.fromstring(
-                file_response.content
-            )
-
-            records = []
-
-            for element in root.iter():
-
-                children = list(
-                    element
-                )
-
-                if not children:
-                    continue
-
-                record = {}
-
-                for child in children:
-
-                    value = (
-                        "".join(
-                            child.itertext()
-                        ).strip()
-                    )
-
-                    if value:
-                        record[
-                            child.tag.split("}")[-1]
-                        ] = value
-
-                if record:
-                    records.append(
-                        record
-                    )
-
-            if not records:
-
-                return None, (
-                    "UE — plik XML nie zawiera "
-                    "rozpoznawalnych rekordów"
-                )
-
-            eu = pd.DataFrame(
-                records
+            eu = pd.read_csv(
+                BytesIO(
+                    response.content
+                ),
+                sep=";",
+                dtype=str,
+                encoding="latin-1",
+                keep_default_na=False
             )
 
         if eu.empty:
 
             return None, (
-                "UE — pobrany plik jest pusty"
+                "UE FSF — pobrany plik jest pusty"
             )
 
         eu.columns = [
@@ -1581,6 +1384,7 @@ def check_eu_sanctions(
         "powod": "",
         "wpis": {}
     }, "OK"
+
 
 
 # =========================================================
