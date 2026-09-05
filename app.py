@@ -379,7 +379,126 @@ def get_krs_data(krs):
 
         return None, None, f"Błąd parsowania KRS: {e}"
 
+# =========================================================
+# KRS - REPREZENTACJA / DZIAŁ 2
+# =========================================================
 
+def get_krs_representation(krs):
+
+    url = (
+        f"https://api-krs.ms.gov.pl/api/krs/"
+        f"OdpisAktualny/{krs}?rejestr=P&format=json"
+    )
+
+    response = requests.get(
+        url,
+        timeout=20
+    )
+
+    if response.status_code != 200:
+        return None, f"KRS HTTP {response.status_code}"
+
+    try:
+
+        data = response.json()
+
+        # -------------------------------------------------
+        # GŁÓWNA STRUKTURA
+        # -------------------------------------------------
+
+        odpis = data.get(
+            "odpis",
+            {}
+        )
+
+        dane = odpis.get(
+            "dane",
+            {}
+        )
+
+        # -------------------------------------------------
+        # DZIAŁ 2
+        # -------------------------------------------------
+
+        dzial2 = dane.get(
+            "dzial2",
+            {}
+        )
+
+        reprezentacja = dzial2.get(
+            "reprezentacja",
+            {}
+        )
+
+        # -------------------------------------------------
+        # SPOSÓB REPREZENTACJI
+        # -------------------------------------------------
+
+        sposob = first_value(
+            reprezentacja.get(
+                "sposobReprezentacji"
+            )
+        )
+
+        # -------------------------------------------------
+        # SKŁAD ORGANU
+        # -------------------------------------------------
+
+        sklad = reprezentacja.get(
+            "sklad",
+            []
+        )
+
+        osoby = []
+
+        for osoba in sklad:
+
+            nazwisko = first_value(
+                osoba.get(
+                    "nazwisko"
+                ),
+                osoba.get(
+                    "nazwaLubFirma"
+                )
+            )
+
+            imiona = first_value(
+                osoba.get(
+                    "imiona"
+                )
+            )
+
+            funkcja = first_value(
+                osoba.get(
+                    "funkcjaWOrganie"
+                ),
+                osoba.get(
+                    "funkcja"
+                )
+            )
+
+            osoby.append({
+                "Nazwisko": nazwisko,
+                "Imiona": imiona,
+                "Funkcja": funkcja
+            })
+
+        # -------------------------------------------------
+        # WYNIK
+        # -------------------------------------------------
+
+        result = {
+
+            "Sposób reprezentacji": sposob,
+
+            "Osoby reprezentujące": osoby
+        }
+
+        return result, "OK"
+
+    except Exception as e:
+
+        return None, f"Błąd parsowania reprezentacji: {e}"
 # =========================================================
 # UPLOAD CSV
 # =========================================================
