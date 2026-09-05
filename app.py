@@ -926,26 +926,191 @@ def check_mswiA_sanctions(
 @st.cache_data(ttl=3600)
 def get_giif_sanctions():
 
-    # Oficjalny plik XLSX publikowany przez Ministerstwo Finansów / GIIF.
-    url = (
-        "https://www.gov.pl/attachment/"
-        "56238b34-8a26-4431-a05a-e1d039f0defa"
+    # Oficjalna strona MF z aktualną krajową listą sankcyjną GIIF.
+    page_url = (
+        "https://www.gov.pl/web/finanse/"
+        "lista-osob-i-podmiotow-wobec-ktorych-stosuje-sie-"
+        "szczegolne-srodki-ograniczajace-na-podstawie-art-118-"
+        "ustawy-z-dnia-1-marca-2018-r-o-przeciwdzialaniu-"
+        "praniu-pieniedzy-i-finansowaniu-terroryzmu"
     )
 
     try:
 
-        response = requests.get(
-            url,
+        page_response = requests.get(
+            page_url,
             timeout=30,
             headers={
                 "User-Agent": "Mozilla/5.0"
             }
         )
 
-        if response.status_code != 200:
+        if page_response.status_code != 200:
 
             return None, (
-                f"GIIF HTTP {response.status_code}"
+                f"GIIF strona HTTP "
+                f"{page_response.status_code}"
+            )
+
+        # Szukamy linków do XLS/XLSX na aktualnej stronie MF.
+        from html.parser import HTMLParser
+        from urllib.parse import urljoin
+
+        class LinkParser(HTMLParser):
+
+            def __init__(self):
+
+                super().__init__()
+
+                self.links = []
+
+            def handle_starttag(
+                self,
+                tag,
+                attrs
+            ):
+
+                if tag.lower() != "a":
+                    return
+
+                attributes = dict(
+                    attrs
+                )
+
+                href = attributes.get(
+                    "href",
+                    ""
+                )
+
+                text_parts = []
+
+                self.current_text = text_parts
+
+                self.links.append(
+                    {
+                        "href": href,
+                        "text": ""
+                    }
+                )
+
+                self.current_link = (
+                    self.links[-1]
+                )
+
+            def handle_data(self, data):
+
+                if hasattr(
+                    self,
+                    "current_link"
+                ):
+
+                    self.current_link["text"] += (
+                        " "
+                        + data.strip()
+                    )
+
+            def handle_endtag(self, tag):
+
+                if tag.lower() == "a" and hasattr(
+                    self,
+                    "current_link"
+                ):
+
+                    self.current_link["text"] = (
+                        self.current_link["text"].strip()
+                    )
+
+                    del self.current_link
+
+        parser = LinkParser()
+
+        parser.feed(
+            page_response.text
+        )
+
+        candidates = []
+
+        for link in parser.links:
+
+            href = link.get(
+                "href",
+                ""
+            )
+
+            label = link.get(
+                "text",
+                ""
+            )
+
+            combined = (
+                href + " " + label
+            ).lower()
+
+            if (
+                ".xlsx" in combined
+                or ".xls" in combined
+            ):
+
+                candidates.append(
+                    href
+                )
+
+        # Usuwamy duplikaty i budujemy pełne adresy.
+        candidates = list(
+            dict.fromkeys(
+                urljoin(
+                    page_url,
+                    href
+                )
+                for href in candidates
+                if href
+            )
+        )
+
+        if not candidates:
+
+            return None, (
+                "GIIF — na stronie MF nie znaleziono "
+                "aktualnego pliku XLS/XLSX"
+            )
+
+        # Próbujemy kandydatów po kolei, zaczynając od XLSX.
+        candidates = sorted(
+            candidates,
+            key=lambda url: (
+                0 if ".xlsx" in url.lower()
+                else 1
+            )
+        )
+
+        file_response = None
+
+        for file_url in candidates:
+
+            try:
+
+                response = requests.get(
+                    file_url,
+                    timeout=30,
+                    headers={
+                        "User-Agent": "Mozilla/5.0"
+                    }
+                )
+
+                if response.status_code == 200:
+
+                    file_response = response
+
+                    break
+
+            except Exception:
+                continue
+
+        if file_response is None:
+
+            return None, (
+                "GIIF — nie udało się pobrać "
+                "aktualnego pliku XLS/XLSX"
             )
 
         from io import BytesIO
@@ -954,7 +1119,7 @@ def get_giif_sanctions():
 
             giif = pd.read_excel(
                 BytesIO(
-                    response.content
+                    file_response.content
                 )
             )
 
@@ -962,7 +1127,7 @@ def get_giif_sanctions():
 
             return None, (
                 "GIIF: brak biblioteki openpyxl. "
-                "W terminalu wykonaj: pip install openpyxl"
+                "Dodaj openpyxl do requirements.txt."
             )
 
         except Exception as e:
