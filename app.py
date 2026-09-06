@@ -1914,6 +1914,46 @@ def check_ofac_sanctions(
     }, status
 
 
+# =========================================================
+# STATUS KOŃCOWY SCREENINGU
+# =========================================================
+
+def get_final_screening_status(row):
+
+    sources = [
+        "MSWiA sankcje",
+        "GIIF sankcje",
+        "UE sankcje",
+        "USA sankcje"
+    ]
+
+    hits = []
+    errors = []
+
+    for source in sources:
+
+        value = str(
+            row.get(source, "")
+        ).strip().upper()
+
+        if value == "ZNALEZIONO":
+            hits.append(source.replace(" sankcje", ""))
+
+        elif value == "BŁĄD":
+            errors.append(source.replace(" sankcje", ""))
+
+    # Trafienie ma najwyższy priorytet.
+    if hits:
+        return "🔴 SANCTIONS HIT", ", ".join(hits), ", ".join(errors)
+
+    # Jeżeli którekolwiek źródło było niedostępne, nie oznaczamy
+    # kontrahenta jako CLEAR.
+    if errors:
+        return "⚠️ DATA ERROR", "", ", ".join(errors)
+
+    return "🟢 CLEAR", "", ""
+
+
 # Token ręczny ma pierwszeństwo przed Secrets / ENV.
 eu_fsf_token = eu_token_manual or get_eu_fsf_token()
 
@@ -2094,7 +2134,17 @@ if uploaded_file is not None:
 
                     "UE sankcje": "",
 
-                    "UE dopasowanie": ""
+                    "UE dopasowanie": "",
+
+                    "USA sankcje": "",
+
+                    "USA dopasowanie": "",
+
+                    "Status końcowy": "",
+
+                    "Źródła z trafieniem": "",
+
+                    "Źródła z błędem": ""
                 }
 
                 # =================================================
@@ -2413,6 +2463,22 @@ if uploaded_file is not None:
                     )
 
                 # -----------------------------------------
+                # STATUS KOŃCOWY
+                # -----------------------------------------
+
+                final_status, hit_sources, error_sources = (
+                    get_final_screening_status(
+                        result
+                    )
+                )
+
+                result["Status końcowy"] = final_status
+
+                result["Źródła z trafieniem"] = hit_sources
+
+                result["Źródła z błędem"] = error_sources
+
+                # -----------------------------------------
                 # ZAPIS WYNIKU
                 # -----------------------------------------
 
@@ -2445,7 +2511,7 @@ if uploaded_file is not None:
             # =================================================
 
             st.subheader(
-                "Wyniki KRS"
+                "Wyniki screeningu"
             )
 
             st.dataframe(
@@ -2482,6 +2548,24 @@ if uploaded_file is not None:
                 ].eq("OK")
             ).sum()
 
+            sanctions_hits = (
+                results_df[
+                    "Status końcowy"
+                ].eq("🔴 SANCTIONS HIT")
+            ).sum()
+
+            data_errors = (
+                results_df[
+                    "Status końcowy"
+                ].eq("⚠️ DATA ERROR")
+            ).sum()
+
+            clear_companies = (
+                results_df[
+                    "Status końcowy"
+                ].eq("🟢 CLEAR")
+            ).sum()
+
             # =================================================
             # METRYKI
             # =================================================
@@ -2500,23 +2584,29 @@ if uploaded_file is not None:
             with col2:
 
                 st.metric(
-                    "Znaleziono KRS",
-                    found_krs
+                    "🟢 CLEAR",
+                    clear_companies
                 )
 
             with col3:
 
                 st.metric(
-                    "Błędy MF",
-                    mf_errors
+                    "🔴 SANCTIONS HIT",
+                    sanctions_hits
                 )
 
             with col4:
 
                 st.metric(
-                    "Błędy KRS",
-                    krs_errors
+                    "⚠️ DATA ERROR",
+                    data_errors
                 )
+
+            st.caption(
+                f"KRS znaleziono: {found_krs} | "
+                f"Błędy MF: {mf_errors} | "
+                f"Błędy KRS: {krs_errors}"
+            )
 
             # =================================================
             # DEBUG
