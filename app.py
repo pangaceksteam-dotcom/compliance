@@ -2027,164 +2027,171 @@ class SearchResultParser(HTMLParser):
 
 
 @st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)
+def get_crbr_wsdl_metadata(endpoint):
+    wsdl_url = endpoint + "?wsdl"
+    try:
+        response = requests.get(wsdl_url, timeout=20, headers={"User-Agent": "Compliance Screening App"})
+    except requests.RequestException as e:
+        return None, f"WSDL — błąd połączenia: {e}"
+    if response.status_code != 200:
+        return None, f"WSDL HTTP {response.status_code}"
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError as e:
+        return None, f"WSDL — nieprawidłowy XML: {e}"
+
+    def local_name(tag):
+        return str(tag or "").split("}")[-1]
+
+    operation = None
+    binding = None
+    for node in root.iter():
+        if local_name(node.tag) != "binding":
+            continue
+        for child in list(node):
+            if local_name(child.tag) == "operation" and child.attrib.get("name") == "PobierzInformacjeOSpolkachIBeneficjentach":
+                binding = node
+                operation = child
+                break
+        if operation is not None:
+            break
+    if operation is None:
+        for node in root.iter():
+            if local_name(node.tag) == "operation" and node.attrib.get("name") == "PobierzInformacjeOSpolkachIBeneficjentach":
+                operation = node
+                break
+    if operation is None:
+        return None, "WSDL — nie znaleziono operacji PobierzInformacjeOSpolkachIBeneficjentach"
+
+    message_qname = ""
+    for child in list(operation):
+        if local_name(child.tag) == "input":
+            message_qname = child.attrib.get("message", "")
+            break
+
+    wrapper_namespace = root.attrib.get("targetNamespace", "")
+    wrapper_local = "PobierzInformacjeOSpolkachIBeneficjentach"
+    message_local = message_qname.split(":", 1)[-1] if message_qname else ""
+
+    if message_local:
+        for node in root.iter():
+            if local_name(node.tag) == "message" and node.attrib.get("name") == message_local:
+                for part in list(node):
+                    if local_name(part.tag) == "part" and part.attrib.get("element"):
+                        element_qname = part.attrib["element"]
+                        wrapper_local = element_qname.split(":", 1)[-1]
+                        prefix = element_qname.split(":", 1)[0] if ":" in element_qname else ""
+                        if prefix in ("ns", "tns"):
+                            wrapper_namespace = "http://www.mf.gov.pl/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01"
+                        break
+                break
+
+    soap_action = ""
+    if binding is not None:
+        for child in list(operation):
+            if child.attrib.get("soapAction"):
+                soap_action = child.attrib["soapAction"]
+                break
+
+    return {"wrapper_namespace": wrapper_namespace, "wrapper_local": wrapper_local, "soap_action": soap_action, "wsdl_url": wsdl_url, "wsdl_status": response.status_code}, "OK"
+
+
+@st.cache_data(ttl=3600)
 def get_crbr_company_data(nip):
-    '''
-    Pobiera aktualne dane spółki z oficjalnego API CRBR Ministerstwa Finansów.
-
-    API CRBR jest publiczne i nie wymaga klucza API. W jednym zapytaniu
-    otrzymujemy zarówno beneficjentów rzeczywistych, jak i osoby uprawnione
-    do reprezentowania spółki.
-
-    Oficjalny endpoint:
-      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01
-
-    Wyszukiwanie wykonywane jest po NIP.
-    '''
-
     nip_clean = re.sub(r"\D", "", str(nip or ""))
-
+    empty = {"people": [], "ubo": [], "details": [], "status": "", "debug": {}}
     if len(nip_clean) != 10:
-        data = {
-            "people": [], "ubo": [], "details": [],
-            "status": "Brak poprawnego NIP"
-        }
-        return data, "Brak poprawnego NIP"
+        empty["status"] = "Brak poprawnego NIP"
+        return empty, empty["status"]
 
-    endpoint = (
-        "https://bramka-crbr.mf.gov.pl:5058/"
-        "uslugiBiznesowe/uslugiESB/AP/"
-        "ApiPrzegladoweCRBR/2022/12/01"
-    )
+    endpoint = "https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01"
+    wsdl_meta, wsdl_status = get_crbr_wsdl_metadata(endpoint)
+    if wsdl_meta is None:
+        wsdl_meta = {"wrapper_namespace": "http://www.mf.gov.pl/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01", "wrapper_local": "PobierzInformacjeOSpolkachIBeneficjentach", "soap_action": "", "wsdl_url": endpoint + "?wsdl", "wsdl_status": "ERROR"}
 
-    ns_service = (
-        "http://www.mf.gov.pl/uslugiBiznesowe/"
-        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/12/01"
-    )
-    ns_schema = (
-        "http://www.mf.gov.pl/schematy/AP/"
-        "ApiPrzegladoweCRBR/2022/12/01"
-    )
+    wrapper_ns = wsdl_meta["wrapper_namespace"]
+    wrapper_local = wsdl_meta["wrapper_local"]
+    soap_action = wsdl_meta.get("soap_action", "")
+    schema_ns = "http://www.mf.gov.pl/schematy/AP/ApiPrzegladoweCRBR/2022/12/01"
 
-    soap_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<soap:Envelope
-    xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-    xmlns:ns="{ns_service}"
-    xmlns:ns1="{ns_schema}">
+    soap_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:ns="{wrapper_ns}" xmlns:ns1="{schema_ns}">
   <soap:Header/>
   <soap:Body>
-    <ns:PobierzInformacjeOSpolkachIBeneficjentach>
+    <ns:{wrapper_local}>
       <PobierzInformacjeOSpolkachIBeneficjentachDane>
         <ns1:SzczegolyWniosku>
           <ns1:NIP>{nip_clean}</ns1:NIP>
         </ns1:SzczegolyWniosku>
       </PobierzInformacjeOSpolkachIBeneficjentachDane>
-    </ns:PobierzInformacjeOSpolkachIBeneficjentach>
+    </ns:{wrapper_local}>
   </soap:Body>
-</soap:Envelope>'''
+</soap:Envelope>"""
+
+    headers = {"Content-Type": "application/soap+xml; charset=utf-8", "Accept": "application/soap+xml, text/xml, */*", "User-Agent": "Compliance Screening App"}
+    if soap_action:
+        headers["Content-Type"] = f'application/soap+xml; charset=utf-8; action="{soap_action}"'
+
+    debug = {"WSDL URL": wsdl_meta.get("wsdl_url", ""), "WSDL status": wsdl_status, "WSDL HTTP": wsdl_meta.get("wsdl_status", ""), "Namespace operacji": wrapper_ns, "Operacja": wrapper_local, "SOAPAction": soap_action or "(brak w WSDL)", "Endpoint": endpoint, "Request headers": repr(headers), "Request XML": soap_xml}
 
     try:
-        response = requests.post(
-            endpoint,
-            data=soap_xml.encode("utf-8"),
-            headers={
-                "Content-Type": "application/soap+xml; charset=utf-8",
-                "Accept": "application/soap+xml, text/xml, */*",
-                "User-Agent": "Compliance Screening App"
-            },
-            timeout=45
-        )
+        response = requests.post(endpoint, data=soap_xml.encode("utf-8"), headers=headers, timeout=45)
     except requests.RequestException as e:
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — błąd połączenia: {e}", "debug": {"Endpoint": endpoint, "Request XML": soap_xml, "Response body": ""}}
+        data = {**empty, "status": f"CRBR — błąd połączenia: {e}", "debug": debug}
         return data, data["status"]
 
-    response_text = response.text or ""
-
-    # Zachowujemy pełny request/response do diagnostyki.
-    # Nie pokazujemy go w głównej tabeli — jest dostępny w expanderze debug.
-    debug_details = {
-        "Endpoint": endpoint,
-        "HTTP status": response.status_code,
-        "Response Content-Type": response.headers.get("Content-Type", ""),
-        "Request XML": soap_xml,
-        "Response body": response_text
-    }
+    debug["HTTP status"] = response.status_code
+    debug["Response Content-Type"] = response.headers.get("Content-Type", "")
+    debug["Response headers"] = repr(dict(response.headers))
+    debug["Response body"] = response.text
 
     if response.status_code != 200:
-        data = {
-            "people": [],
-            "ubo": [],
-            "details": [],
-            "status": f"CRBR HTTP {response.status_code}",
-            "debug": debug_details
-        }
+        data = {**empty, "status": f"CRBR HTTP {response.status_code}", "debug": debug}
         return data, data["status"]
 
     try:
         root = ET.fromstring(response.content)
     except ET.ParseError as e:
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — nieprawidłowy XML: {e}", "debug": debug_details}
+        data = {**empty, "status": f"CRBR — nieprawidłowy XML: {e}", "debug": debug}
         return data, data["status"]
 
     def local_name(tag):
         return str(tag or "").split("}")[-1]
-
     def children_by_name(parent, name):
         return [child for child in list(parent) if local_name(child.tag) == name]
-
     def first_child(parent, name):
         for child in list(parent):
             if local_name(child.tag) == name:
                 return child
         return None
-
     def child_text(parent, name):
         child = first_child(parent, name)
-        if child is None or child.text is None:
-            return ""
-        return str(child.text).strip()
+        return str(child.text).strip() if child is not None and child.text else ""
 
-    fault = next(
-        (element for element in root.iter() if local_name(element.tag) == "Fault"),
-        None
-    )
+    fault = next((element for element in root.iter() if local_name(element.tag) == "Fault"), None)
     if fault is not None:
-        fault_text = " ".join(
-            text.strip() for text in fault.itertext() if text and text.strip()
-        )
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR SOAP Fault: {fault_text}", "debug": debug_details}
+        fault_text = " ".join(text.strip() for text in fault.itertext() if text and text.strip())
+        data = {**empty, "status": f"CRBR SOAP Fault: {fault_text}", "debug": debug}
         return data, data["status"]
 
-    status_element = next(
-        (element for element in root.iter() if local_name(element.tag) == "Status"),
-        None
-    )
-    crbr_status = (
-        str(status_element.text).strip()
-        if status_element is not None and status_element.text
-        else ""
-    )
-
+    status_element = next((element for element in root.iter() if local_name(element.tag) == "Status"), None)
+    crbr_status = str(status_element.text).strip() if status_element is not None and status_element.text else ""
     if crbr_status == "BrakInformacji":
-        data = {"people": [], "ubo": [], "details": [], "status": "BrakInformacji", "debug": debug_details}
+        data = {**empty, "status": "BrakInformacji", "debug": debug}
         return data, "Brak informacji w CRBR"
-
     if crbr_status == "BladFormalny":
-        data = {"people": [], "ubo": [], "details": [], "status": "BladFormalny", "debug": debug_details}
+        data = {**empty, "status": "BladFormalny", "debug": debug}
         return data, "CRBR — błąd formalny zapytania"
 
-    company_nodes = [
-        element for element in root.iter()
-        if local_name(element.tag) == "SpolkaIBeneficjenci"
-    ]
-
+    company_nodes = [element for element in root.iter() if local_name(element.tag) == "SpolkaIBeneficjenci"]
     if not company_nodes:
         status = crbr_status or "Brak danych SpolkaIBeneficjenci"
-        data = {"people": [], "ubo": [], "details": [], "status": status, "debug": debug_details}
+        data = {**empty, "status": status, "debug": debug}
         return data, status
 
     def presentation_date(node):
         return child_text(node, "DataPoczatkuPrezentacjiZgloszenia")
-
     company_node = sorted(company_nodes, key=presentation_date, reverse=True)[0]
 
     people = []
@@ -2194,25 +2201,11 @@ def get_crbr_company_data(nip):
             first_name = child_text(rep, "PierwszeImie")
             middle_names = child_text(rep, "KolejneImiona")
             last_name = child_text(rep, "Nazwisko")
-            full_name = " ".join(
-                part for part in (first_name, middle_names, last_name) if part
-            ).strip()
+            full_name = " ".join(part for part in (first_name, middle_names, last_name) if part).strip()
             if not full_name:
                 continue
-
             representation_type = child_text(rep, "RodzajReprezentacji")
-            people.append({
-                "Osoba": full_name,
-                "Funkcja": representation_type or "OSOBA UPRAWNIONA DO REPREZENTACJI",
-                "Od": "",
-                "Confidence": 100,
-                "Źródło": "CRBR — Ministerstwo Finansów",
-                "Obywatelstwo": child_text(rep, "Obywatelstwo"),
-                "Rezydencja": child_text(rep, "KrajZamieszkania"),
-                "Data urodzenia": child_text(rep, "DataUrodzenia"),
-                "Rodzaj reprezentacji": representation_type,
-                "Inne informacje": child_text(rep, "InneInformacje")
-            })
+            people.append({"Osoba": full_name, "Funkcja": representation_type or "OSOBA UPRAWNIONA DO REPREZENTACJI", "Od": "", "Confidence": 100, "Źródło": "CRBR — Ministerstwo Finansów", "Obywatelstwo": child_text(rep, "Obywatelstwo"), "Rezydencja": child_text(rep, "KrajZamieszkania"), "Data urodzenia": child_text(rep, "DataUrodzenia"), "Rodzaj reprezentacji": representation_type, "Inne informacje": child_text(rep, "InneInformacje")})
 
     ubo = []
     beneficiaries = first_child(company_node, "ListaBeneficjentowRzeczywistych")
@@ -2222,14 +2215,11 @@ def get_crbr_company_data(nip):
             middle_names = child_text(beneficiary, "KolejneImiona")
             last_name = child_text(beneficiary, "Nazwisko")
             group_name = child_text(beneficiary, "NazwaBeneficjentaGrupowego")
-            full_name = " ".join(
-                part for part in (first_name, middle_names, last_name) if part
-            ).strip()
+            full_name = " ".join(part for part in (first_name, middle_names, last_name) if part).strip()
             if not full_name and group_name:
                 full_name = group_name
             if not full_name:
                 continue
-
             rights = []
             rights_list = first_child(beneficiary, "ListaInformacjiOUdzialach")
             if rights_list is not None:
@@ -2237,42 +2227,25 @@ def get_crbr_company_data(nip):
                     direct = first_child(info, "UprawnieniaWlascicielskieBezposrednie")
                     indirect = first_child(info, "UprawnieniaWlascicielskiePosrednie")
                     other = first_child(info, "InneUprawnienia")
-
                     for block in (direct, indirect):
                         if block is not None:
                             right_type = child_text(block, "RodzajUprawnienWlascicielskich")
                             unit = child_text(block, "JednostkaMiary")
                             amount = child_text(block, "Ilosc")
-                            text = " — ".join(
-                                part for part in (right_type, amount, unit) if part
-                            )
+                            text = " — ".join(part for part in (right_type, amount, unit) if part)
                             if text:
                                 rights.append(text)
-
                     if other is not None and other.text:
                         rights.append(str(other.text).strip())
-
-            ubo.append({
-                "Osoba": full_name,
-                "Typ": "BENEFICJENT RZECZYWISTY",
-                "Data urodzenia": child_text(beneficiary, "DataUrodzenia"),
-                "Rezydencja": child_text(beneficiary, "KrajZamieszkania"),
-                "Obywatelstwo": child_text(beneficiary, "Obywatelstwo"),
-                "Uprawnienia": "; ".join(dict.fromkeys(rights)),
-                "Źródło": "CRBR — Ministerstwo Finansów"
-            })
+            ubo.append({"Osoba": full_name, "Typ": "BENEFICJENT RZECZYWISTY", "Data urodzenia": child_text(beneficiary, "DataUrodzenia"), "Rezydencja": child_text(beneficiary, "KrajZamieszkania"), "Obywatelstwo": child_text(beneficiary, "Obywatelstwo"), "Uprawnienia": "; ".join(dict.fromkeys(rights)), "Źródło": "CRBR — Ministerstwo Finansów"})
 
     def dedupe_people(items):
         unique = {}
         for item in items:
-            key = (
-                normalize_text(item.get("Osoba", "")),
-                normalize_text(item.get("Funkcja", ""))
-            )
+            key = (normalize_text(item.get("Osoba", "")), normalize_text(item.get("Funkcja", "")))
             if key[0] and key not in unique:
                 unique[key] = item
         return list(unique.values())
-
     def dedupe_ubo(items):
         unique = {}
         for item in items:
@@ -2281,24 +2254,8 @@ def get_crbr_company_data(nip):
                 unique[key] = item
         return list(unique.values())
 
-    details = [{
-        "NIP": child_text(company_node, "NIP"),
-        "KRS": child_text(company_node, "KRS"),
-        "Nazwa CRBR": child_text(company_node, "Nazwa"),
-        "Data początku prezentacji": child_text(company_node, "DataPoczatkuPrezentacjiZgloszenia"),
-        "Data końca prezentacji": child_text(company_node, "DataKoncaPrezentacjiZgloszenia"),
-        "Skorygowane": child_text(company_node, "Skorygowane"),
-        "Numer referencyjny": child_text(company_node, "NumerReferencyjny"),
-        "Status CRBR": crbr_status or "IstniejaInformacje"
-    }]
-
-    data = {
-        "people": dedupe_people(people),
-        "ubo": dedupe_ubo(ubo),
-        "details": details,
-        "status": crbr_status or "IstniejaInformacje",
-        "debug": debug_details
-    }
+    details = [{"NIP": child_text(company_node, "NIP"), "KRS": child_text(company_node, "KRS"), "Nazwa CRBR": child_text(company_node, "Nazwa"), "Data początku prezentacji": child_text(company_node, "DataPoczatkuPrezentacjiZgloszenia"), "Data końca prezentacji": child_text(company_node, "DataKoncaPrezentacjiZgloszenia"), "Skorygowane": child_text(company_node, "Skorygowane"), "Numer referencyjny": child_text(company_node, "NumerReferencyjny"), "Status CRBR": crbr_status or "IstniejaInformacje"}]
+    data = {"people": dedupe_people(people), "ubo": dedupe_ubo(ubo), "details": details, "status": crbr_status or "IstniejaInformacje", "debug": debug}
     return data, "OK — CRBR Ministerstwo Finansów"
 
 
