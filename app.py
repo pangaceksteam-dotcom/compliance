@@ -17,7 +17,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🔎 Sanctions Screening")
+st.title("🔎 Sanctions Screening — KRS / PL / EU / USA")
 st.write("Wgraj plik CSV z kontrahentami.")
 
 
@@ -1644,6 +1644,276 @@ def check_eu_sanctions(
     }, status
 
 
+# =========================================================
+# USA / OFAC - SDN + CONSOLIDATED NON-SDN
+# =========================================================
+
+# OFAC's Sanctions List Service (SLS) is the official source.
+# The stable /api/download/ endpoints redirect to the current
+# publication file. OFAC requires a User-Agent on automated requests.
+OFAC_SDN_URL = (
+    "https://sanctionslistservice.ofac.treas.gov/"
+    "api/download/sdn.xml"
+)
+
+OFAC_CONSOLIDATED_URL = (
+    "https://sanctionslistservice.ofac.treas.gov/"
+    "api/download/consolidated.xml"
+)
+
+OFAC_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0 Safari/537.36"
+    ),
+    "Accept": "application/xml,text/xml,application/octet-stream,*/*"
+}
+
+
+def parse_ofac_xml(content, list_name):
+
+    """
+    Parsuje klasyczny OFAC XML (SDN.XML / CONSOLIDATED.XML).
+
+    Dla każdego wpisu budujemy jeden rekord tekstowy zawierający
+    nazwę, aliasy, adresy, programy i pozostałe informacje opublikowane
+    przez OFAC. Dzięki temu screening może szukać nie tylko nazwy
+    głównej, ale również aliasów i identyfikatorów zapisanych w rekordzie.
+    """
+
+    root = ET.fromstring(content)
+
+    rows = []
+
+    for entry in root.iter():
+
+        local_name = entry.tag.split(
+            "}",
+            1
+        )[-1]
+
+        if local_name.lower() not in (
+            "sdnentry",
+            "entry"
+        ):
+            continue
+
+        values = []
+
+        for element in entry.iter():
+
+            text = (element.text or "").strip()
+
+            if text:
+                values.append(text)
+
+            for attr_value in element.attrib.values():
+
+                attr_value = str(attr_value).strip()
+
+                if attr_value:
+                    values.append(attr_value)
+
+        values = list(
+            dict.fromkeys(values)
+        )
+
+        if not values:
+            continue
+
+        # Szukamy podstawowego numeru wpisu, jeżeli występuje.
+        entry_id = ""
+
+        for element in entry.iter():
+
+            local = element.tag.split(
+                "}",
+                1
+            )[-1].lower()
+
+            if local in (
+                "uid",
+                "ent_num",
+                "entnum"
+            ):
+
+                text = (element.text or "").strip()
+
+                if text:
+                    entry_id = text
+                    break
+
+        rows.append({
+            "OFAC lista": list_name,
+            "OFAC ID": entry_id,
+            "_OFAC row text": " ".join(values)
+        })
+
+    if not rows:
+
+        raise ValueError(
+            f"{list_name}: XML nie zawiera wpisów"
+        )
+
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600)
+def get_ofac_sanctions():
+
+    """
+    Pobiera oficjalne listy OFAC:
+
+    1. SDN - Specially Designated Nationals and Blocked Persons
+    2. Consolidated - Non-SDN sanctions lists
+
+    OFAC publikuje oba pliki przez Sanctions List Service (SLS).
+    """
+
+    datasets = [
+
+        (
+            OFAC_SDN_URL,
+            "SDN"
+        ),
+
+        (
+            OFAC_CONSOLIDATED_URL,
+            "CONSOLIDATED"
+        )
+    ]
+
+    all_rows = []
+
+    for url, list_name in datasets:
+
+        try:
+
+            response = requests.get(
+                url,
+                timeout=120,
+                headers=OFAC_HEADERS
+            )
+
+        except requests.RequestException as e:
+
+            return None, (
+                f"OFAC {list_name}: błąd połączenia — {e}"
+            )
+
+        if response.status_code != 200:
+
+            return None, (
+                f"OFAC {list_name}: HTTP "
+                f"{response.status_code}"
+            )
+
+        try:
+
+            parsed = parse_ofac_xml(
+                response.content,
+                list_name
+            )
+
+            all_rows.append(
+                parsed
+            )
+
+        except Exception as e:
+
+            return None, (
+                f"OFAC {list_name}: błąd parsowania — {e}"
+            )
+
+    result = pd.concat(
+        all_rows,
+        ignore_index=True
+    )
+
+    return result, "OK"
+
+
+def check_ofac_sanctions(
+    name,
+    nip,
+    krs
+):
+
+    sanctions, status = (
+        get_ofac_sanctions()
+    )
+
+    if sanctions is None:
+
+        return None, status
+
+    name_norm = normalize_text(
+        name
+    )
+
+    nip_norm = normalize_text(
+        nip
+    )
+
+    krs_norm = normalize_text(
+        krs
+    )
+
+    for _, row in sanctions.iterrows():
+
+        row_text = str(
+            row.get(
+                "_OFAC row text",
+                ""
+            )
+        )
+
+        row_norm = normalize_text(
+            row_text
+        )
+
+        list_name = first_value(
+            row.get(
+                "OFAC lista"
+            )
+        )
+
+        if nip_norm and nip_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": f"NIP ({list_name})",
+                "wpis": row.to_dict()
+            }, status
+
+        if krs_norm and krs_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": f"KRS ({list_name})",
+                "wpis": row.to_dict()
+            }, status
+
+        if (
+            name_norm
+            and len(name_norm) >= 5
+            and name_norm in row_norm
+        ):
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": f"NAZWA ({list_name})",
+                "wpis": row.to_dict()
+            }, status
+
+    return {
+        "status": "NIE ZNALEZIONO",
+        "powod": "",
+        "wpis": {}
+    }, status
+
+
 # Token ręczny ma pierwszeństwo przed Secrets / ENV.
 eu_fsf_token = eu_token_manual or get_eu_fsf_token()
 
@@ -2057,6 +2327,51 @@ if uploaded_file is not None:
 
                                 result["UE dopasowanie"] = (
                                     eu_result.get(
+                                        "powod",
+                                        ""
+                                    )
+                                )
+
+
+                            # -------------------------------------
+                            # SCREENING USA / OFAC
+                            # -------------------------------------
+
+                            ofac_result, ofac_status = (
+                                check_ofac_sanctions(
+                                    result.get(
+                                        "Nazwa KRS",
+                                        ""
+                                    ),
+                                    result.get(
+                                        "NIP KRS",
+                                        ""
+                                    ),
+                                    krs
+                                )
+                            )
+
+                            if ofac_result is None:
+
+                                result["USA sankcje"] = (
+                                    "BŁĄD"
+                                )
+
+                                result["USA dopasowanie"] = (
+                                    ofac_status
+                                )
+
+                            else:
+
+                                result["USA sankcje"] = (
+                                    ofac_result.get(
+                                        "status",
+                                        ""
+                                    )
+                                )
+
+                                result["USA dopasowanie"] = (
+                                    ofac_result.get(
                                         "powod",
                                         ""
                                     )
