@@ -1157,18 +1157,87 @@ def check_mswiA_sanctions(
     if sanctions is None:
         return None, status
 
-    if not str(nip or "").strip() and not str(krs or "").strip():
-        matched_status, reason, wpis = _person_match_in_index(
-            sanctions, name, dob
-        )
+def _uk_find_column(df, *names):
+    """Znajduje kolumnę UKSL niezależnie od wielkości liter/spacji."""
+    normalized = {
+        re.sub(r"\s+", " ", str(c).strip()).casefold(): c
+        for c in df.columns
+    }
+    for name in names:
+        key = re.sub(r"\s+", " ", str(name).strip()).casefold()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
+def parse_uk_csv(content):
+    """
+    Parsuje aktualny UK Sanctions List CSV.
+
+    UKSL ma osobne pola Name 1..Name 6 oraz DOB. Nie spłaszczamy
+    tych pól do jednego tekstu dla matchingu osób. Zachowujemy je
+    osobno, ponieważ np. Melnichenko występuje jako:
+    Name 6 = MELNICHENKO, Name 1 = ANDREY, Name 2 = IGOREVICH.
+    """
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            df = pd.read_csv(
+                BytesIO(content),
+                dtype=str,
+                keep_default_na=False,
+                encoding=encoding,
+            )
+            break
+        except Exception as e:
+            last_error = e
     else:
-        matched_status, reason, wpis = _fast_find_in_index(
-            sanctions,
-            name,
-            nip,
-            krs,
-            dob=dob
-        )
+        raise ValueError(f"UK Sanctions List CSV: nie można odczytać — {last_error}")
+
+    if df.empty:
+        raise ValueError("UK Sanctions List CSV jest pusty")
+
+    df.columns = [str(column).strip() for column in df.columns]
+
+    # Normalny indeks tekstowy nadal jest potrzebny dla spółek.
+    df["_UK row text"] = df.apply(
+        lambda row: " ".join(
+            str(value).strip()
+            for value in row.tolist()
+            if str(value).strip()
+        ),
+        axis=1,
+    )
+
+    # Jawne pola osoby — UKSL format guide definiuje Name 1..Name 6 i DOB.
+    name_cols = []
+    for i in range(1, 7):
+        col = _uk_find_column(df, f"Name {i}")
+        if col:
+            name_cols.append(col)
+
+    df["_UK person name text"] = df.apply(
+        lambda row: " ".join(
+            str(row.get(col, "")).strip()
+            for col in name_cols
+            if str(row.get(col, "")).strip()
+        ),
+        axis=1,
+    )
+
+    dob_col = _uk_find_column(df, "DOB", "Date of Birth", "Date Of Birth")
+    if dob_col:
+        df["_UK DOB"] = df[dob_col].astype(str).str.strip()
+    else:
+        df["_UK DOB"] = ""
+
+    group_col = _uk_find_column(df, "Group ID", "Group Id", "GroupID")
+    if group_col:
+        df["_UK Group ID"] = df[group_col].astype(str).str.strip()
+    else:
+        df["_UK Group ID"] = ""
+
+    return df
 
     return {
         "status": matched_status,
@@ -2031,42 +2100,85 @@ UK_SANCTIONS_HEADERS = {
 }
 
 
+def _uk_find_column(df, *names):
+    """Znajduje kolumnę UKSL niezależnie od wielkości liter/spacji."""
+    normalized = {
+        re.sub(r"\s+", " ", str(c).strip()).casefold(): c
+        for c in df.columns
+    }
+    for name in names:
+        key = re.sub(r"\s+", " ", str(name).strip()).casefold()
+        if key in normalized:
+            return normalized[key]
+    return None
+
+
 def parse_uk_csv(content):
-
     """
-    Parsuje oficjalny UK Sanctions List CSV.
+    Parsuje aktualny UK Sanctions List CSV.
 
-    Nie zakładamy konkretnego układu kolumn do matchingu. Budujemy
-    dodatkowe pole tekstowe z całego rekordu, dzięki czemu możemy
-    sprawdzać nazwę, aliasy, adresy, numery rejestracyjne i pozostałe
-    identyfikatory publikowane przez UK.
+    UKSL ma osobne pola Name 1..Name 6 oraz DOB. Nie spłaszczamy
+    tych pól do jednego tekstu dla matchingu osób. Zachowujemy je
+    osobno, ponieważ np. Melnichenko występuje jako:
+    Name 6 = MELNICHENKO, Name 1 = ANDREY, Name 2 = IGOREVICH.
     """
-
-    df = pd.read_csv(
-        BytesIO(content),
-        dtype=str,
-        keep_default_na=False
-    )
+    last_error = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            df = pd.read_csv(
+                BytesIO(content),
+                dtype=str,
+                keep_default_na=False,
+                encoding=encoding,
+            )
+            break
+        except Exception as e:
+            last_error = e
+    else:
+        raise ValueError(f"UK Sanctions List CSV: nie można odczytać — {last_error}")
 
     if df.empty:
+        raise ValueError("UK Sanctions List CSV jest pusty")
 
-        raise ValueError(
-            "UK Sanctions List CSV jest pusty"
-        )
+    df.columns = [str(column).strip() for column in df.columns]
 
-    df.columns = [
-        str(column).strip()
-        for column in df.columns
-    ]
-
+    # Normalny indeks tekstowy nadal jest potrzebny dla spółek.
     df["_UK row text"] = df.apply(
         lambda row: " ".join(
             str(value).strip()
             for value in row.tolist()
             if str(value).strip()
         ),
-        axis=1
+        axis=1,
     )
+
+    # Jawne pola osoby — UKSL format guide definiuje Name 1..Name 6 i DOB.
+    name_cols = []
+    for i in range(1, 7):
+        col = _uk_find_column(df, f"Name {i}")
+        if col:
+            name_cols.append(col)
+
+    df["_UK person name text"] = df.apply(
+        lambda row: " ".join(
+            str(row.get(col, "")).strip()
+            for col in name_cols
+            if str(row.get(col, "")).strip()
+        ),
+        axis=1,
+    )
+
+    dob_col = _uk_find_column(df, "DOB", "Date of Birth", "Date Of Birth")
+    if dob_col:
+        df["_UK DOB"] = df[dob_col].astype(str).str.strip()
+    else:
+        df["_UK DOB"] = ""
+
+    group_col = _uk_find_column(df, "Group ID", "Group Id", "GroupID")
+    if group_col:
+        df["_UK Group ID"] = df[group_col].astype(str).str.strip()
+    else:
+        df["_UK Group ID"] = ""
 
     return df
 
@@ -2113,6 +2225,87 @@ def get_uk_sanctions():
             "UK Sanctions List: błąd parsowania — "
             f"{e}"
         )
+
+
+def _person_match_uk(index, person_name, dob=""):
+    """Matcher osoby dla UKSL oparty o Name 1..Name 6 + DOB/Group ID."""
+    if index is None or not person_name:
+        return "NIE ZNALEZIONO", "", {}
+
+    import difflib
+
+    query_tokens = _person_name_tokens(person_name)
+    if len(query_tokens) < 2:
+        return "NIE ZNALEZIONO", "", {}
+
+    # Nazwisko przyjmujemy jako ostatni token wejścia, ale porównujemy je
+    # z Name 6 oraz z całym zestawem pól nazwiskowych UKSL.
+    q_surname = query_tokens[-1]
+    q_first = query_tokens[:-1]
+    dob_vars = _dob_variants(dob)
+
+    name_cols = [c for c in index.columns if c.startswith("Name ")]
+    candidates = []
+
+    for _, row in index.iterrows():
+        row_name = " ".join(
+            str(row.get(c, "")).strip()
+            for c in name_cols
+            if str(row.get(c, "")).strip()
+        )
+        if not row_name:
+            continue
+
+        row_tokens = _person_name_tokens(row_name)
+        if not row_tokens:
+            continue
+
+        # Nazwisko: exact albo bardzo mocna zgodność transliteracyjna.
+        surname_best = max(
+            (difflib.SequenceMatcher(None, q_surname, token).ratio()
+             for token in row_tokens),
+            default=0.0,
+        )
+        if q_surname not in row_tokens and surname_best < 0.90:
+            continue
+
+        # Imię/imiona: każdy token wejściowy musi znaleźć sensowny odpowiednik
+        # w Name 1..Name 5. Dzięki temu Andrey/Andrei przechodzi.
+        first_matches = []
+        for q in q_first:
+            best = max(
+                (difflib.SequenceMatcher(None, q, token).ratio()
+                 for token in row_tokens),
+                default=0.0,
+            )
+            first_matches.append(best)
+
+        if not first_matches or max(first_matches) < 0.82:
+            continue
+
+        dob_hit = False
+        row_dob = str(row.get("_UK DOB", "")).strip()
+        if dob_vars and row_dob:
+            dob_norm = normalize_text(row_dob)
+            dob_hit = any(
+                v == dob_norm or v in dob_norm or dob_norm in v
+                for v in dob_vars
+            )
+
+        score = 100.0 + surname_best + max(first_matches) + (50.0 if dob_hit else 0.0)
+        candidates.append((score, dob_hit, row))
+
+    if not candidates:
+        return "NIE ZNALEZIONO", "", {}
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, dob_hit, row = candidates[0]
+
+    reason = "UKSL — Name 1-6"
+    if dob_hit:
+        reason += " + DATA URODZENIA"
+
+    return "ZNALEZIONO", reason, row.to_dict()
 
 
 def check_uk_sanctions(
