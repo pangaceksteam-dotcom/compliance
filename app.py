@@ -42,38 +42,11 @@ with st.sidebar:
     ).strip()
 
 
-    st.header("👤 Rejestr.io")
+    st.header("🇵🇱 CRBR")
 
-    # Klucz można podać przez Streamlit Secrets / zmienną środowiskową
-    # albo jednorazowo w polu poniżej. Nie zapisujemy go w kodzie.
-    try:
-        rejestr_io_secret = str(
-            st.secrets.get("REJESTR_IO_API_KEY", "")
-        ).strip()
-    except Exception:
-        rejestr_io_secret = ""
-
-    rejestr_io_env = os.getenv(
-        "REJESTR_IO_API_KEY",
-        ""
-    ).strip()
-
-    rejestr_io_key_manual = st.text_input(
-        "Klucz API Rejestr.io",
-        value="",
-        type="password",
-        help=(
-            "Klucz API Rejestr.io. "
-            "Najbezpieczniej przechowywać go w Streamlit Secrets "
-            "jako REJESTR_IO_API_KEY. "
-            "Pole ręczne nie jest zapisywane w repozytorium. Odpytanie Rejestr.io jest cache'owane przez 1 godzinę."
-        )
-    ).strip()
-
-    rejestr_io_api_key = (
-        rejestr_io_key_manual
-        or rejestr_io_secret
-        or rejestr_io_env
+    st.caption(
+        "Oficjalny, bezpłatny CRBR Ministerstwa Finansów. "
+        "Pobieramy UBO oraz osoby uprawnione do reprezentacji spółki."
     )
 
 
@@ -2053,504 +2026,364 @@ class SearchResultParser(HTMLParser):
             self.parts.append(text)
 
 
-def split_person_mask(person):
-    """
-    Rozbija zanonimizowaną osobę z KRS na tokeny imienia/nazwiska.
+@st.cache_data(ttl=3600)
+def get_crbr_company_data(nip):
+    '''
+    Pobiera aktualne dane spółki z oficjalnego API CRBR Ministerstwa Finansów.
 
-    Przykłady akceptowane:
-      J**** K******
-      J***N K*****I
-      Jan**** Kowals****
+    API CRBR jest publiczne i nie wymaga klucza API. W jednym zapytaniu
+    otrzymujemy zarówno beneficjentów rzeczywistych, jak i osoby uprawnione
+    do reprezentowania spółki.
 
-    Zwraca listę tokenów zawierających pierwszą/ostatnią literę
-    oraz długość tokenu.
-    """
+    Oficjalny endpoint:
+      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01
 
-    text = str(person or "").strip()
-    text = re.sub(r"\s+", " ", text)
+    Wyszukiwanie wykonywane jest po NIP.
+    '''
 
-    # Bierzemy tylko tokeny zawierające litery; usuwamy typowe dodatki.
-    tokens = re.findall(
-        r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż*-]+",
-        text
-    )
+    nip_clean = re.sub(r"\D", "", str(nip or ""))
 
-    tokens = [
-        token.strip("-")
-        for token in tokens
-        if token.strip("-")
-    ]
-
-    if len(tokens) < 2:
-        return []
-
-    result = []
-
-    for token in tokens[:2]:
-        letters = [c for c in token if c.isalpha()]
-        if not letters:
-            continue
-
-        result.append({
-            "mask": token,
-            "length": len(letters),
-            "first": letters[0],
-            "last": letters[-1] if not set(letters) <= {"*"} else ""
-        })
-
-    return result if len(result) >= 2 else []
-
-
-def person_mask_matches(masked_person, candidate_name):
-    """Sprawdza, czy pełne nazwisko pasuje do maski KRS."""
-
-    masks = split_person_mask(masked_person)
-
-    if len(masks) < 2:
-        return False, 0
-
-    # Kandydat może zawierać drugie imię / nazwisko dwuczłonowe.
-    candidate_tokens = re.findall(
-        r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]+",
-        str(candidate_name or "")
-    )
-
-    candidate_tokens = [
-        x for x in candidate_tokens
-        if x and x.lower() not in {
-            "prezes", "zarządu", "zarzad", "członek", "czlonek",
-            "wiceprezes", "wice", "członk", "czlonk"
+    if len(nip_clean) != 10:
+        data = {
+            "people": [], "ubo": [], "details": [],
+            "status": "Brak poprawnego NIP"
         }
+        return data, "Brak poprawnego NIP"
+
+    endpoint = (
+        "https://bramka-crbr.mf.gov.pl:5058/"
+        "uslugiBiznesowe/uslugiESB/AP/"
+        "ApiPrzegladoweCRBR/2022/12/01"
+    )
+
+    ns_service = (
+        "http://www.mf.gov.pl/uslugiBiznesowe/"
+        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/12/01"
+    )
+    ns_schema = (
+        "http://www.mf.gov.pl/schematy/AP/"
+        "ApiPrzegladoweCRBR/2022/12/01"
+    )
+
+    soap_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope
+    xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+    xmlns:ns="{ns_service}"
+    xmlns:ns1="{ns_schema}">
+  <soap:Header/>
+  <soap:Body>
+    <ns:PobierzInformacjeOSpolkachIBeneficjentach>
+      <PobierzInformacjeOSpolkachIBeneficjentachDane>
+        <ns1:SzczegolyWniosku>
+          <ns1:NIP>{nip_clean}</ns1:NIP>
+        </ns1:SzczegolyWniosku>
+      </PobierzInformacjeOSpolkachIBeneficjentachDane>
+    </ns:PobierzInformacjeOSpolkachIBeneficjentach>
+  </soap:Body>
+</soap:Envelope>'''
+
+    try:
+        response = requests.post(
+            endpoint,
+            data=soap_xml.encode("utf-8"),
+            headers={
+                "Content-Type": "application/soap+xml; charset=utf-8",
+                "Accept": "application/soap+xml, text/xml, */*",
+                "User-Agent": "Compliance Screening App"
+            },
+            timeout=30
+        )
+    except requests.RequestException as e:
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — błąd połączenia: {e}"}
+        return data, data["status"]
+
+    if response.status_code != 200:
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR HTTP {response.status_code}"}
+        return data, data["status"]
+
+    try:
+        root = ET.fromstring(response.content)
+    except ET.ParseError as e:
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — nieprawidłowy XML: {e}"}
+        return data, data["status"]
+
+    def local_name(tag):
+        return str(tag or "").split("}")[-1]
+
+    def children_by_name(parent, name):
+        return [child for child in list(parent) if local_name(child.tag) == name]
+
+    def first_child(parent, name):
+        for child in list(parent):
+            if local_name(child.tag) == name:
+                return child
+        return None
+
+    def child_text(parent, name):
+        child = first_child(parent, name)
+        if child is None or child.text is None:
+            return ""
+        return str(child.text).strip()
+
+    fault = next(
+        (element for element in root.iter() if local_name(element.tag) == "Fault"),
+        None
+    )
+    if fault is not None:
+        fault_text = " ".join(
+            text.strip() for text in fault.itertext() if text and text.strip()
+        )
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR SOAP Fault: {fault_text}"}
+        return data, data["status"]
+
+    status_element = next(
+        (element for element in root.iter() if local_name(element.tag) == "Status"),
+        None
+    )
+    crbr_status = (
+        str(status_element.text).strip()
+        if status_element is not None and status_element.text
+        else ""
+    )
+
+    if crbr_status == "BrakInformacji":
+        data = {"people": [], "ubo": [], "details": [], "status": "BrakInformacji"}
+        return data, "Brak informacji w CRBR"
+
+    if crbr_status == "BladFormalny":
+        data = {"people": [], "ubo": [], "details": [], "status": "BladFormalny"}
+        return data, "CRBR — błąd formalny zapytania"
+
+    company_nodes = [
+        element for element in root.iter()
+        if local_name(element.tag) == "SpolkaIBeneficjenci"
     ]
 
-    if len(candidate_tokens) < 2:
-        return False, 0
+    if not company_nodes:
+        status = crbr_status or "Brak danych SpolkaIBeneficjenci"
+        data = {"people": [], "ubo": [], "details": [], "status": status}
+        return data, status
 
-    # Sprawdzamy wszystkie sensowne pary imię/nazwisko.
-    best_score = 0
-    best_match = False
+    def presentation_date(node):
+        return child_text(node, "DataPoczatkuPrezentacjiZgloszenia")
 
-    for i in range(len(candidate_tokens) - 1):
-        pair = [candidate_tokens[i], candidate_tokens[i + 1]]
-        score = 0
-        ok = True
+    company_node = sorted(company_nodes, key=presentation_date, reverse=True)[0]
 
-        for mask, cand in zip(masks[:2], pair):
-            cand_letters = [c for c in cand if c.isalpha()]
-            if len(cand_letters) != mask["length"]:
-                ok = False
-                break
+    people = []
+    representatives = first_child(company_node, "ListaReprezentantow")
+    if representatives is not None:
+        for rep in children_by_name(representatives, "Reprezentant"):
+            first_name = child_text(rep, "PierwszeImie")
+            middle_names = child_text(rep, "KolejneImiona")
+            last_name = child_text(rep, "Nazwisko")
+            full_name = " ".join(
+                part for part in (first_name, middle_names, last_name) if part
+            ).strip()
+            if not full_name:
+                continue
 
-            if cand_letters[0].casefold() != mask["first"].casefold():
-                ok = False
-                break
+            representation_type = child_text(rep, "RodzajReprezentacji")
+            people.append({
+                "Osoba": full_name,
+                "Funkcja": representation_type or "OSOBA UPRAWNIONA DO REPREZENTACJI",
+                "Od": "",
+                "Confidence": 100,
+                "Źródło": "CRBR — Ministerstwo Finansów",
+                "Obywatelstwo": child_text(rep, "Obywatelstwo"),
+                "Rezydencja": child_text(rep, "KrajZamieszkania"),
+                "Data urodzenia": child_text(rep, "DataUrodzenia"),
+                "Rodzaj reprezentacji": representation_type,
+                "Inne informacje": child_text(rep, "InneInformacje")
+            })
 
-            # KRS nie zawsze pokazuje ostatnią literę. Jeżeli ją mamy,
-            # musi się zgadzać.
-            if mask["last"] and (
-                cand_letters[-1].casefold() != mask["last"].casefold()
-            ):
-                ok = False
-                break
+    ubo = []
+    beneficiaries = first_child(company_node, "ListaBeneficjentowRzeczywistych")
+    if beneficiaries is not None:
+        for beneficiary in children_by_name(beneficiaries, "BeneficjentRzeczywisty"):
+            first_name = child_text(beneficiary, "PierwszeImie")
+            middle_names = child_text(beneficiary, "KolejneImiona")
+            last_name = child_text(beneficiary, "Nazwisko")
+            group_name = child_text(beneficiary, "NazwaBeneficjentaGrupowego")
+            full_name = " ".join(
+                part for part in (first_name, middle_names, last_name) if part
+            ).strip()
+            if not full_name and group_name:
+                full_name = group_name
+            if not full_name:
+                continue
 
-            score += 25
+            rights = []
+            rights_list = first_child(beneficiary, "ListaInformacjiOUdzialach")
+            if rights_list is not None:
+                for info in children_by_name(rights_list, "InformacjaOUdzialach"):
+                    direct = first_child(info, "UprawnieniaWlascicielskieBezposrednie")
+                    indirect = first_child(info, "UprawnieniaWlascicielskiePosrednie")
+                    other = first_child(info, "InneUprawnienia")
 
-        if ok:
-            best_match = True
-            best_score = max(best_score, score + 50)
+                    for block in (direct, indirect):
+                        if block is not None:
+                            right_type = child_text(block, "RodzajUprawnienWlascicielskich")
+                            unit = child_text(block, "JednostkaMiary")
+                            amount = child_text(block, "Ilosc")
+                            text = " — ".join(
+                                part for part in (right_type, amount, unit) if part
+                            )
+                            if text:
+                                rights.append(text)
 
-    return best_match, best_score
+                    if other is not None and other.text:
+                        rights.append(str(other.text).strip())
 
+            ubo.append({
+                "Osoba": full_name,
+                "Typ": "BENEFICJENT RZECZYWISTY",
+                "Data urodzenia": child_text(beneficiary, "DataUrodzenia"),
+                "Rezydencja": child_text(beneficiary, "KrajZamieszkania"),
+                "Obywatelstwo": child_text(beneficiary, "Obywatelstwo"),
+                "Uprawnienia": "; ".join(dict.fromkeys(rights)),
+                "Źródło": "CRBR — Ministerstwo Finansów"
+            })
 
-def extract_name_candidates(text):
-    """Wyciąga potencjalne pary imię+nazwisko z tekstu wyników."""
+    def dedupe_people(items):
+        unique = {}
+        for item in items:
+            key = (
+                normalize_text(item.get("Osoba", "")),
+                normalize_text(item.get("Funkcja", ""))
+            )
+            if key[0] and key not in unique:
+                unique[key] = item
+        return list(unique.values())
 
-    # Typowe polskie imię/nazwisko zaczynające się wielką literą.
-    pattern = re.compile(
-        r"\b([A-ZĄĆĘŁŃÓŚŹŻ][A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]{2,})"
-        r"\s+"
-        r"([A-ZĄĆĘŁŃÓŚŹŻ][A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]{2,})\b"
-    )
+    def dedupe_ubo(items):
+        unique = {}
+        for item in items:
+            key = normalize_text(item.get("Osoba", ""))
+            if key and key not in unique:
+                unique[key] = item
+        return list(unique.values())
 
-    candidates = []
-    seen = set()
+    details = [{
+        "NIP": child_text(company_node, "NIP"),
+        "KRS": child_text(company_node, "KRS"),
+        "Nazwa CRBR": child_text(company_node, "Nazwa"),
+        "Data początku prezentacji": child_text(company_node, "DataPoczatkuPrezentacjiZgloszenia"),
+        "Data końca prezentacji": child_text(company_node, "DataKoncaPrezentacjiZgloszenia"),
+        "Skorygowane": child_text(company_node, "Skorygowane"),
+        "Numer referencyjny": child_text(company_node, "NumerReferencyjny"),
+        "Status CRBR": crbr_status or "IstniejaInformacje"
+    }]
 
-    for match in pattern.finditer(text):
-        candidate = f"{match.group(1)} {match.group(2)}"
-        key = normalize_text(candidate)
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-        candidates.append(candidate)
-
-    return candidates
-
-
-def google_search_people(krs, company_name, role, masked_person):
-    """
-    Resolver osoby zanonimizowanej przez KRS.
-
-    Google bardzo często blokuje automatyczne zapytania HTTP kodem 403.
-    Dlatego używamy dwóch zwykłych, publicznych interfejsów wyszukiwarek:
-      1) DuckDuckGo HTML
-      2) Google jako fallback
-
-    Nie próbujemy obchodzić CAPTCHA ani innych zabezpieczeń.
-    Jeżeli wyszukiwarki nie zwrócą wyników, osoba nie jest automatycznie
-    odanonimizowywana.
-    """
-
-    krs_clean = re.sub(r"\D", "", str(krs or ""))
-    company = str(company_name or "").strip()
-    role_text = str(role or "").strip()
-
-    masks = split_person_mask(masked_person)
-
-    if not krs_clean or len(masks) < 2:
-        return [], "Nie udało się odczytać maski osoby z KRS"
-
-    query = (
-        f'"{krs_clean}" "{role_text}" '
-        f'"{company}" site:rejestr.io'
-    )
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/140.0 Safari/537.36"
-        ),
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;"
-            "q=0.9,*/*;q=0.8"
-        )
+    data = {
+        "people": dedupe_people(people),
+        "ubo": dedupe_ubo(ubo),
+        "details": details,
+        "status": crbr_status or "IstniejaInformacje",
     }
+    return data, "OK — CRBR Ministerstwo Finansów"
 
-    search_engines = [
-        (
-            "DuckDuckGo",
-            "https://html.duckduckgo.com/html/",
-            {"q": query}
-        ),
-        (
-            "Google",
-            "https://www.google.com/search",
-            {"q": query, "hl": "pl", "num": "10"}
-        )
+
+def resolve_people_from_crbr(nip):
+    '''Zwraca aktualne osoby uprawnione do reprezentacji z CRBR.'''
+    data, status = get_crbr_company_data(nip)
+    if not data.get("people"):
+        return [], status, data
+    return data["people"], "OK — CRBR Ministerstwo Finansów", data
+
+
+def screen_ubo_on_sanctions(person_name):
+    """
+    Screening beneficjenta rzeczywistego na tych samych listach
+    co reprezentantów i kontrahenta.
+    """
+
+    result = screen_person_on_sanctions(
+        person_name
+    )
+
+    result["Typ osoby"] = (
+        "BENEFICJENT RZECZYWISTY"
+    )
+
+    return result
+
+
+def get_ubo_screening_status(ubo_results):
+    """Agreguje wynik screeningu beneficjentów rzeczywistych."""
+
+    if not ubo_results:
+        return "", "", ""
+
+    hits = []
+    errors_by_source = {}
+
+    source_map = [
+        ("MSWiA", "MSWiA"),
+        ("GIIF", "GIIF"),
+        ("EU", "EU"),
+        ("UK", "UK"),
+        ("USA", "USA")
     ]
+
+    for person in ubo_results:
+
+        person_name = person.get(
+            "Osoba",
+            ""
+        )
+
+        for field, label in source_map:
+
+            value = str(
+                person.get(
+                    field,
+                    ""
+                )
+            ).strip().upper()
+
+            if value == "ZNALEZIONO":
+
+                hits.append(
+                    f"{person_name} — {label}"
+                )
+
+            elif value == "BŁĄD":
+
+                errors_by_source.setdefault(
+                    label,
+                    []
+                ).append(
+                    person_name
+                )
 
     errors = []
 
-    for engine_name, url, params in search_engines:
+    for source, people in errors_by_source.items():
 
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                timeout=20
-            )
-        except requests.RequestException as e:
-            errors.append(
-                f"{engine_name} — błąd połączenia: {e}"
-            )
-            continue
-
-        if response.status_code != 200:
-            errors.append(
-                f"{engine_name} HTTP {response.status_code}"
-            )
-            continue
-
-        lower_html = response.text.lower()
-
-        if (
-            "captcha" in lower_html
-            or "unusual traffic" in lower_html
-            or "detected unusual traffic" in lower_html
-            or "automated queries" in lower_html
-        ):
-            errors.append(
-                f"{engine_name} — automatyczne wyszukiwanie zablokowane/CAPTCHA"
-            )
-            continue
-
-        parser = SearchResultParser()
-
-        try:
-            parser.feed(response.text)
-        except Exception as e:
-            errors.append(
-                f"{engine_name} — błąd parsowania: {e}"
-            )
-            continue
-
-        visible_text = " ".join(parser.parts)
-        candidates = extract_name_candidates(visible_text)
-        normalized_text = normalize_text(visible_text)
-
-        scored = []
-
-        for candidate in candidates:
-
-            matched, score = person_mask_matches(
-                masked_person,
-                candidate
-            )
-
-            if not matched:
-                continue
-
-            context_score = 0
-
-            if (
-                krs_clean
-                and krs_clean in normalized_text
-            ):
-                context_score += 20
-
-            if (
-                company
-                and normalize_text(company) in normalized_text
-            ):
-                context_score += 15
-
-            if (
-                role_text
-                and normalize_text(role_text) in normalized_text
-            ):
-                context_score += 15
-
-            total_score = min(
-                100,
-                score + context_score
-            )
-
-            scored.append({
-                "Osoba": candidate,
-                "Confidence": total_score,
-                "Źródło": f"{engine_name} → Rejestr.io",
-                "Zapytanie": query
-            })
-
-        unique = {}
-
-        for item in scored:
-            key = normalize_text(item["Osoba"])
-
-            if (
-                key not in unique
-                or item["Confidence"]
-                > unique[key]["Confidence"]
-            ):
-                unique[key] = item
-
-        results = sorted(
-            unique.values(),
-            key=lambda x: x["Confidence"],
-            reverse=True
+        unique_people = list(
+            dict.fromkeys(people)
         )
-
-        if results:
-            return results[:5], "OK"
 
         errors.append(
-            f"{engine_name} — brak kandydata pasującego do maski"
+            f"{source} — błąd dla "
+            f"{len(unique_people)} osób"
         )
 
-    return [], " | ".join(errors)
-
-@st.cache_data(ttl=3600)
-def get_rejestr_io_people(krs, api_key):
-    """
-    Pobiera aktualne osoby powiązane z organizacją z Rejestr.io.
-
-    Korzystamy z:
-      GET /api/v2/org/{krs}/krs-powiazania?aktualnosc=aktualne
-
-    API zwraca aktualne powiązania z KRS oraz dane osoby.
-    Do screeningu osób reprezentujących wybieramy powiązania typu
-    KRS_BOARD. Rejestr.io dokumentuje, że domyślne/aktualne powiązania
-    odpowiadają najnowszemu wpisowi do KRS.
-    """
-
-    if not api_key:
-        return [], "Brak klucza API Rejestr.io"
-
-    krs_clean = re.sub(
-        r"\D",
-        "",
-        str(krs or "")
-    )
-
-    if not krs_clean:
-        return [], "Brak numeru KRS"
-
-    url = (
-        f"https://rejestr.io/api/v2/org/"
-        f"{krs_clean}/krs-powiazania"
-    )
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "User-Agent": "Compliance Screening App"
-    }
-
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"aktualnosc": "aktualne"},
-            timeout=20
-        )
-    except requests.RequestException as e:
-        return [], f"Rejestr.io — błąd połączenia: {e}"
-
-    if response.status_code in (401, 403):
-        return [], (
-            f"Rejestr.io HTTP {response.status_code} — "
-            "sprawdź klucz API i aktywację API"
+    if hits:
+        return (
+            "🔴 SANCTIONS HIT",
+            "; ".join(hits),
+            "; ".join(errors)
         )
 
-    if response.status_code == 402:
-        return [], (
-            "Rejestr.io HTTP 402 — brak środków / wymagany plan"
+    if errors:
+        return (
+            "⚠️ DATA ERROR",
+            "",
+            "; ".join(errors)
         )
 
-    if response.status_code == 429:
-        return [], (
-            "Rejestr.io HTTP 429 — przekroczony limit zapytań"
-        )
-
-    if response.status_code != 200:
-        return [], (
-            f"Rejestr.io HTTP {response.status_code}"
-        )
-
-    try:
-        data = response.json()
-    except Exception as e:
-        return [], f"Rejestr.io — nieprawidłowy JSON: {e}"
-
-    if not isinstance(data, list):
-        return [], "Rejestr.io — nieoczekiwany format odpowiedzi"
-
-    people = []
-
-    for item in data:
-
-        if not isinstance(item, dict):
-            continue
-
-        if item.get("typ") != "osoba":
-            continue
-
-        identity = item.get("tozsamosc") or {}
-
-        if not isinstance(identity, dict):
-            continue
-
-        full_name = first_value(
-            identity.get("imiona_i_nazwisko"),
-            (
-                f"{first_value(identity.get('imie'))} "
-                f"{first_value(identity.get('nazwisko'))}"
-            ).strip()
-        )
-
-        if not full_name:
-            continue
-
-        # Powiązanie z konkretną odpytaną organizacją.
-        relations = item.get(
-            "krs_powiazania_kwerendowane",
-            []
-        )
-
-        if not isinstance(relations, list):
-            relations = []
-
-        board_relations = []
-
-        for relation in relations:
-
-            if not isinstance(relation, dict):
-                continue
-
-            relation_type = str(
-                relation.get("typ", "")
-            ).strip().upper()
-
-            description = first_value(
-                relation.get("opis"),
-                relation.get("nazwa"),
-                "CZŁONEK ORGANU"
-            )
-
-            # KRS_BOARD = członek organu reprezentacji.
-            if relation_type == "KRS_BOARD":
-                board_relations.append({
-                    "Funkcja": description,
-                    "Od": first_value(
-                        relation.get("data_start")
-                    ),
-                    "Do": first_value(
-                        relation.get("data_koniec")
-                    )
-                })
-
-        for relation in board_relations:
-
-            # aktualne powiązanie powinno mieć brak daty końcowej.
-            # Jeśli API mimo wszystko zwróci datę końca, pomijamy je.
-            if relation["Do"]:
-                continue
-
-            people.append({
-                "Osoba": full_name,
-                "Funkcja": relation["Funkcja"],
-                "Od": relation["Od"],
-                "Confidence": 100,
-                "Źródło": "Rejestr.io API"
-            })
-
-    # Usuwamy duplikaty osoby + funkcji.
-    unique = {}
-
-    for person in people:
-
-        key = (
-            normalize_text(person["Osoba"]),
-            normalize_text(person["Funkcja"])
-        )
-
-        if key not in unique:
-            unique[key] = person
-
-    return list(unique.values()), "OK"
-
-
-def resolve_people_from_rejestr_io(krs, api_key):
-    """
-    Zwraca aktualne osoby z organu reprezentacji.
-
-    Nie korzystamy już z Google, DuckDuckGo ani z anonimizowanej maski KRS.
-    Rejestr.io dostarcza jawne imię/nazwisko oraz funkcję.
-    """
-
-    people, status = get_rejestr_io_people(
-        krs,
-        api_key
-    )
-
-    if not people:
-        return [], status
-
-    return people, "OK — Rejestr.io API"
+    return "🟢 CLEAR", "", ""
 
 
 
@@ -2772,6 +2605,25 @@ def get_final_screening_status(row):
         if person_errors:
             errors.append("OSOBY: " + person_errors)
 
+    # Screening beneficjentów rzeczywistych ma taki sam priorytet.
+    ubo_status = str(
+        row.get("Screening UBO", "")
+    ).strip()
+
+    if ubo_status == "🔴 SANCTIONS HIT":
+        ubo_hits = str(
+            row.get("UBO trafienia", "")
+        ).strip()
+        if ubo_hits:
+            hits.append("UBO: " + ubo_hits)
+
+    elif ubo_status == "⚠️ DATA ERROR":
+        ubo_errors = str(
+            row.get("UBO błędy", "")
+        ).strip()
+        if ubo_errors:
+            errors.append("UBO: " + ubo_errors)
+
     # Trafienie ma najwyższy priorytet.
     if hits:
         return "🔴 SANCTIONS HIT", "; ".join(hits), "; ".join(errors)
@@ -2956,6 +2808,10 @@ if uploaded_file is not None:
                     "Screening osób": "",
                     "Osoby trafienia": "",
                     "Osoby błędy": "",
+                    "Beneficjenci rzeczywiści": "",
+                    "Screening UBO": "",
+                    "UBO trafienia": "",
+                    "UBO błędy": "",
                     "MSWiA sankcje": "",
 
                     "MSWiA dopasowanie": "",
@@ -3082,67 +2938,55 @@ if uploaded_file is not None:
                                 )
 
                             # -------------------------------------
-                            # OSOBY — REJESTR.IO API
+                            # OSOBY + UBO — OFICJALNY CRBR MF
                             # -------------------------------------
 
                             resolved_people = []
                             resolver_details = []
                             resolver_errors = []
+                            crbr_data = {
+                                "people": [],
+                                "ubo": [],
+                                "details": [],
+                                "status": ""
+                            }
 
-                            if rejestr_io_api_key:
-
-                                rejestr_people, rejestr_status = (
-                                    resolve_people_from_rejestr_io(
-                                        krs,
-                                        rejestr_io_api_key
-                                    )
+                            crbr_people, crbr_status, crbr_data = (
+                                resolve_people_from_crbr(
+                                    result.get("NIP KRS") or nip
                                 )
+                            )
 
-                                if rejestr_people:
-
-                                    for person in rejestr_people:
-
-                                        resolved_people.append(
-                                            person
+                            if crbr_people:
+                                resolved_people = crbr_people
+                                for person in resolved_people:
+                                    resolver_details.append({
+                                        "Źródło": "CRBR — Ministerstwo Finansów",
+                                        "Osoba": person.get("Osoba", ""),
+                                        "Rodzaj reprezentacji": person.get(
+                                            "Rodzaj reprezentacji",
+                                            person.get("Funkcja", "")
+                                        ),
+                                        "Data urodzenia": person.get(
+                                            "Data urodzenia", ""
+                                        ),
+                                        "Obywatelstwo": person.get(
+                                            "Obywatelstwo", ""
+                                        ),
+                                        "Rezydencja": person.get(
+                                            "Rezydencja", ""
                                         )
-
-                                        resolver_details.append({
-                                            "KRS maska": "",
-                                            "Funkcja": person.get(
-                                                "Funkcja",
-                                                ""
-                                            ),
-                                            "Resolver": (
-                                                "OK — Rejestr.io API"
-                                            ),
-                                            "Kandydaci": (
-                                                f"{person.get('Osoba', '')} "
-                                                f"(100%)"
-                                            )
-                                        })
-
-                                else:
-
-                                    resolver_errors.append(
-                                        f"Rejestr.io — {rejestr_status}"
-                                    )
-
+                                    })
                             else:
-
                                 resolver_errors.append(
-                                    "Brak klucza API Rejestr.io"
+                                    f"CRBR — {crbr_status}"
                                 )
-
 
                             # -------------------------------------
                             # SCREENING OSÓB
                             # -------------------------------------
 
                             if resolved_people:
-
-                                # Rejestr.io zwrócił jawne osoby.
-                                # Każdą osobę sprawdzamy na tych samych listach
-                                # co kontrahenta.
                                 result["Osoby reprezentujące"] = (
                                     "; ".join(
                                         f"{p.get('Osoba', '')} — {p.get('Funkcja', '')}"
@@ -3151,18 +2995,24 @@ if uploaded_file is not None:
                                 )
 
                                 people_screening = []
-
                                 for person in resolved_people:
-
                                     person_result = screen_person_on_sanctions(
                                         person.get("Osoba", "")
                                     )
-
                                     person_result["Funkcja"] = person.get(
                                         "Funkcja", ""
                                     )
-                                    person_result["Od"] = person.get(
-                                        "Od", ""
+                                    person_result["Rodzaj reprezentacji"] = person.get(
+                                        "Rodzaj reprezentacji", ""
+                                    )
+                                    person_result["Data urodzenia"] = person.get(
+                                        "Data urodzenia", ""
+                                    )
+                                    person_result["Obywatelstwo"] = person.get(
+                                        "Obywatelstwo", ""
+                                    )
+                                    person_result["Rezydencja"] = person.get(
+                                        "Rezydencja", ""
                                     )
                                     person_result["Confidence"] = person.get(
                                         "Confidence", ""
@@ -3170,10 +3020,7 @@ if uploaded_file is not None:
                                     person_result["Źródło"] = person.get(
                                         "Źródło", ""
                                     )
-
-                                    people_screening.append(
-                                        person_result
-                                    )
+                                    people_screening.append(person_result)
 
                                 person_status, person_hits, person_errors = (
                                     get_people_screening_status(
@@ -3185,62 +3032,77 @@ if uploaded_file is not None:
                                 result["Osoby trafienia"] = person_hits
 
                                 combined_errors = []
-
                                 if person_errors:
                                     combined_errors.append(person_errors)
-
                                 if resolver_errors:
                                     combined_errors.extend(resolver_errors)
 
                                 result["Osoby błędy"] = "; ".join(
                                     x for x in combined_errors if x
                                 )
-
                                 result["_people_details"] = people_screening
                                 result["_resolver_details"] = resolver_details
-
-                                # Jeżeli część osób nie została pobrana,
-                                # nie uznajemy screeningu osób za CLEAR.
-                                if (
-                                    resolver_errors
-                                    and result["Screening osób"]
-                                    != "🔴 SANCTIONS HIT"
-                                ):
-                                    result["Screening osób"] = "⚠️ DATA ERROR"
-
                             else:
-
-                                # Rejestr.io nie zwrócił jawnych osób.
-                                # Zostawiamy informację z KRS, ale nie udajemy,
-                                # że screening osób został wykonany.
-                                if osoby:
-                                    result["Osoby reprezentujące"] = (
-                                        "; ".join(
-                                            (
-                                                first_value(
-                                                    m.get("Imiona"), ""
-                                                )
-                                                + " "
-                                                + first_value(
-                                                    m.get("Nazwisko"), ""
-                                                )
-                                                + " — "
-                                                + first_value(
-                                                    m.get("Funkcja"), ""
-                                                )
-                                            ).strip()
-                                            for m in osoby
-                                        )
-                                    )
-
                                 result["Screening osób"] = "⚠️ DATA ERROR"
                                 result["Osoby błędy"] = "; ".join(
                                     resolver_errors
-                                    or [
-                                        "Nie znaleziono jawnych osób w Rejestr.io"
-                                    ]
+                                    or ["CRBR nie zwrócił osób reprezentujących"]
                                 )
                                 result["_resolver_details"] = resolver_details
+
+                            # -------------------------------------
+                            # BENEFICJENCI RZECZYWIŚCI — CRBR
+                            # -------------------------------------
+
+                            ubo_people = crbr_data.get("ubo", [])
+
+                            if ubo_people:
+                                result["Beneficjenci rzeczywiści"] = (
+                                    "; ".join(
+                                        f"{p.get('Osoba', '')}"
+                                        for p in ubo_people
+                                    )
+                                )
+
+                                ubo_details = []
+                                for ubo in ubo_people:
+                                    ubo_result = screen_ubo_on_sanctions(
+                                        ubo.get("Osoba", "")
+                                    )
+                                    ubo_result["Data urodzenia"] = ubo.get(
+                                        "Data urodzenia", ""
+                                    )
+                                    ubo_result["Rezydencja"] = ubo.get(
+                                        "Rezydencja", ""
+                                    )
+                                    ubo_result["Obywatelstwo"] = ubo.get(
+                                        "Obywatelstwo", ""
+                                    )
+                                    ubo_result["Uprawnienia"] = ubo.get(
+                                        "Uprawnienia", ""
+                                    )
+                                    ubo_result["Źródło"] = ubo.get(
+                                        "Źródło", ""
+                                    )
+                                    ubo_details.append(ubo_result)
+
+                                (
+                                    ubo_status_final,
+                                    ubo_hits,
+                                    ubo_errors_text
+                                ) = get_ubo_screening_status(ubo_details)
+
+                                result["Screening UBO"] = ubo_status_final
+                                result["UBO trafienia"] = ubo_hits
+                                result["UBO błędy"] = ubo_errors_text
+                                result["_ubo_details"] = ubo_details
+                            else:
+                                result["Screening UBO"] = "⚠️ DATA ERROR"
+                                result["UBO błędy"] = f"CRBR — {crbr_status}"
+
+                            result["_crbr_details"] = crbr_data.get(
+                                "details", []
+                            )
 
                             # -------------------------------------
                             # SCREENING MSWiA
@@ -3543,13 +3405,21 @@ if uploaded_file is not None:
             # Szczegóły screeningu osób trzymamy poza główną tabelą.
             people_debug = {}
             resolver_debug = {}
+            ubo_debug = {}
+            crbr_debug = {}
             for item in results:
                 if item.get("_people_details"):
                     people_debug[item.get("NIP", "")] = item["_people_details"]
                 if item.get("_resolver_details"):
                     resolver_debug[item.get("NIP", "")] = item["_resolver_details"]
+                if item.get("_ubo_details"):
+                    ubo_debug[item.get("NIP", "")] = item["_ubo_details"]
+                if item.get("_crbr_details"):
+                    crbr_debug[item.get("NIP", "")] = item["_crbr_details"]
                 item.pop("_people_details", None)
                 item.pop("_resolver_details", None)
+                item.pop("_ubo_details", None)
+                item.pop("_crbr_details", None)
 
             results_df = pd.DataFrame(
                 results
@@ -3661,6 +3531,30 @@ if uploaded_file is not None:
             # SCREENING OSÓB — SZCZEGÓŁY
             # =================================================
 
+
+            with st.expander(
+                "👥 Beneficjenci rzeczywiści — CRBR"
+            ):
+                if ubo_debug:
+
+                    selected_ubo_nip = st.selectbox(
+                        "Wybierz NIP dla UBO:",
+                        list(ubo_debug.keys()),
+                        key="ubo_debug_nip"
+                    )
+
+                    st.dataframe(
+                        pd.DataFrame(
+                            ubo_debug[selected_ubo_nip]
+                        ),
+                        use_container_width=True
+                    )
+
+                else:
+                    st.write(
+                        "Brak danych UBO z CRBR."
+                    )
+
             st.divider()
 
             with st.expander(
@@ -3685,24 +3579,24 @@ if uploaded_file is not None:
                 else:
 
                     st.write(
-                        "Brak osób odanonimizowanych automatycznie."
+                        "Brak jawnych danych osób z CRBR."
                     )
 
             with st.expander(
-                "🧩 Rejestr.io API → osoby — szczegóły"
+                "🇵🇱 CRBR — szczegóły odpowiedzi Ministerstwa Finansów"
             ):
 
-                if resolver_debug:
+                if crbr_debug:
 
-                    selected_resolver_nip = st.selectbox(
+                    selected_crbr_nip = st.selectbox(
                         "Wybierz NIP:",
-                        list(resolver_debug.keys()),
-                        key="resolver_debug_nip"
+                        list(crbr_debug.keys()),
+                        key="crbr_debug_nip"
                     )
 
                     st.dataframe(
                         pd.DataFrame(
-                            resolver_debug[selected_resolver_nip]
+                            crbr_debug[selected_crbr_nip]
                         ),
                         use_container_width=True
                     )
@@ -3710,7 +3604,7 @@ if uploaded_file is not None:
                 else:
 
                     st.write(
-                        "Brak danych resolvera."
+                        "Brak danych CRBR."
                     )
 
             # =================================================
