@@ -2657,12 +2657,12 @@ eu_fsf_token = eu_token_manual or get_eu_fsf_token()
 
 
 # =========================================================
-# UPLOAD CSV
+# UPLOAD XLSX
 # =========================================================
 
 uploaded_file = st.file_uploader(
-    "Wybierz plik CSV",
-    type=["csv"]
+    "Wybierz plik XLSX",
+    type=["xlsx"]
 )
 
 
@@ -2671,30 +2671,64 @@ if uploaded_file is not None:
     try:
 
         # =================================================
-        # WCZYTANIE CSV
+        # WCZYTANIE XLSX
         # =================================================
 
-        df = pd.read_csv(
+        df = pd.read_excel(
             uploaded_file,
-            dtype=str
+            dtype=str,
+            engine="openpyxl"
         )
 
         df.columns = (
             df.columns
+            .astype(str)
             .str.strip()
         )
+
+        # Akceptujemy zarówno krótką nazwę „Nazwa”, jak i bardziej
+        # opisową „Nazwa spółki lub imię nazwisko”.
+        name_column = None
+        for candidate in [
+            "Nazwa",
+            "Nazwa spółki lub imię nazwisko",
+            "Nazwa / imię i nazwisko",
+            "Imię i nazwisko"
+        ]:
+            if candidate in df.columns:
+                name_column = candidate
+                break
+
+        if "NIP" not in df.columns:
+            # NIP jest opcjonalny — brak NIP oznacza rekord osoby.
+            df["NIP"] = ""
+
+        if name_column is None:
+            st.error(
+                "Plik XLSX musi zawierać kolumnę 'Nazwa' "
+                "albo 'Nazwa spółki lub imię nazwisko'."
+            )
+            st.stop()
+
+        if name_column != "Nazwa":
+            df["Nazwa"] = df[name_column]
 
         st.success(
             f"Plik wczytany poprawnie — "
             f"{len(df)} rekordów."
         )
 
+        st.info(
+            "Logika: NIP + nazwa = screening spółki; "
+            "brak NIP = screening osoby po imieniu i nazwisku."
+        )
+
         # =================================================
-        # PODGLĄD CSV
+        # PODGLĄD XLSX
         # =================================================
 
         st.subheader(
-            "Kontrahenci"
+            "Rekordy do screeningu"
         )
 
         st.dataframe(
@@ -2703,23 +2737,11 @@ if uploaded_file is not None:
         )
 
         # =================================================
-        # WALIDACJA NIP
-        # =================================================
-
-        if "NIP" not in df.columns:
-
-            st.error(
-                "CSV musi zawierać kolumnę 'NIP'."
-            )
-
-            st.stop()
-
-        # =================================================
         # PRZYCISK SCREENINGU
         # =================================================
 
         if st.button(
-            "🔎 Sprawdź KRS",
+            "🔎 Uruchom screening",
             type="primary"
         ):
 
@@ -2764,6 +2786,89 @@ if uploaded_file is not None:
                     )
                 ).strip()
 
+                # Jeżeli NIP jest pusty, traktujemy rekord jako OSOBĘ.
+                # Nie próbujemy szukać jej w KRS/CRBR — od razu screeningujemy
+                # imię i nazwisko na wszystkich dostępnych listach sankcyjnych.
+                if not nip:
+
+                    person_name = nazwa_csv
+
+                    status_text.write(
+                        f"Sprawdzanie "
+                        f"{i + 1} / {total} "
+                        f"— osoba: {person_name}"
+                    )
+
+                    person_result = screen_person_on_sanctions(
+                        person_name
+                    )
+
+                    (
+                        person_status,
+                        person_hits,
+                        person_errors
+                    ) = get_people_screening_status(
+                        [person_result]
+                    )
+
+                    result = {
+                        "Typ rekordu": "OSOBA",
+                        "NIP": "",
+                        "Nazwa z CSV": person_name,
+                        "KRS": "",
+                        "Nazwa KRS": "",
+                        "Forma prawna": "",
+                        "NIP KRS": "",
+                        "REGON": "",
+                        "REGON KRS": "",
+                        "Data rejestracji": "",
+                        "Data ostatniego wpisu": "",
+                        "Stan na dzień": "",
+                        "Województwo": "",
+                        "Powiat": "",
+                        "Gmina": "",
+                        "Miejscowość": "",
+                        "Ulica": "",
+                        "Nr domu": "",
+                        "Nr lokalu": "",
+                        "Kod pocztowy": "",
+                        "Status MF": "N/D — osoba",
+                        "Status KRS": "N/D — osoba",
+                        "Sposób reprezentacji": "",
+                        "Osoby reprezentujące": person_name,
+                        "Screening osób": person_status,
+                        "Osoby trafienia": person_hits,
+                        "Osoby błędy": person_errors,
+                        "Spółka publiczna": "N/D — osoba",
+                        "Beneficjenci rzeczywiści": "",
+                        "Screening UBO": "N/D — osoba",
+                        "UBO trafienia": "",
+                        "UBO błędy": "",
+                        "MSWiA sankcje": person_result.get("MSWiA", ""),
+                        "MSWiA dopasowanie": person_result.get("MSWiA dopasowanie", ""),
+                        "GIIF sankcje": person_result.get("GIIF", ""),
+                        "GIIF dopasowanie": person_result.get("GIIF dopasowanie", ""),
+                        "UE sankcje": person_result.get("UE", ""),
+                        "UE dopasowanie": person_result.get("UE dopasowanie", ""),
+                        "USA sankcje": person_result.get("USA", ""),
+                        "USA dopasowanie": person_result.get("USA dopasowanie", ""),
+                        "UK sankcje": person_result.get("UK", ""),
+                        "UK dopasowanie": person_result.get("UK dopasowanie", ""),
+                    }
+
+                    final_status, hit_sources, error_sources = (
+                        get_final_screening_status(result)
+                    )
+
+                    result["Status końcowy"] = final_status
+                    result["Źródła z trafieniem"] = hit_sources
+                    result["Źródła z błędem"] = error_sources
+                    result["_people_details"] = [person_result]
+
+                    results.append(result)
+                    progress.progress((i + 1) / total)
+                    continue
+
                 status_text.write(
                     f"Sprawdzanie "
                     f"{i + 1} / {total} "
@@ -2775,6 +2880,8 @@ if uploaded_file is not None:
                 # ---------------------------------------------
 
                 result = {
+
+                    "Typ rekordu": "SPÓŁKA",
 
                     "NIP": nip,
 
