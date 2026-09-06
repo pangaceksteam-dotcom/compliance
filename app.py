@@ -6,7 +6,8 @@ import re
 from html.parser import HTMLParser
 from io import BytesIO
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, datetime
+import getpass
 
 
 # =========================================================
@@ -48,6 +49,157 @@ with st.sidebar:
         "Oficjalny, bezpłatny CRBR Ministerstwa Finansów. "
         "Pobieramy UBO oraz osoby uprawnione do reprezentacji spółki."
     )
+
+
+
+
+# =========================================================
+# RAPORT XLSX
+# =========================================================
+
+def get_computer_username():
+
+    """Zwraca nazwę użytkownika systemowego.
+
+    Przy uruchomieniu lokalnym jest to użytkownik komputera,
+    natomiast w Streamlit Cloud będzie to użytkownik środowiska
+    serwerowego (przeglądarka nie udostępnia nazwy użytkownika PC).
+    """
+
+    return first_value(
+        os.environ.get("USERNAME"),
+        os.environ.get("USER"),
+        getpass.getuser()
+    )
+
+
+def build_xlsx_report(results_df, people_debug, ubo_debug, crbr_debug, resolver_debug, report_username=""):
+
+    """Buduje raport XLSX z podsumowaniem i pełnymi danymi screeningu."""
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+
+    ws_summary = wb.active
+    ws_summary.title = "Podsumowanie"
+
+    checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    username = (str(report_username).strip() or get_computer_username())
+
+    total = len(results_df)
+    clear_count = int((results_df.get("Status końcowy", pd.Series(dtype=str)) == "🟢 CLEAR").sum())
+    hit_count = int((results_df.get("Status końcowy", pd.Series(dtype=str)) == "🔴 SANCTIONS HIT").sum())
+    error_count = int((results_df.get("Status końcowy", pd.Series(dtype=str)) == "⚠️ DATA ERROR").sum())
+
+    summary_rows = [
+        ("Data sprawdzenia", checked_at),
+        ("Użytkownik komputera", username),
+        ("Liczba rekordów", total),
+        ("🟢 CLEAR", clear_count),
+        ("🔴 SANCTIONS HIT", hit_count),
+        ("⚠️ DATA ERROR", error_count),
+    ]
+
+    ws_summary.append(["Podsumowanie screeningu", ""])
+    ws_summary["A1"].font = Font(bold=True, size=14)
+
+    for key, value in summary_rows:
+        ws_summary.append([key, value])
+
+    ws_summary.append([])
+    ws_summary.append(list(results_df.columns))
+
+    header_row = ws_summary.max_row
+    for cell in ws_summary[header_row]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    for row in results_df.itertuples(index=False, name=None):
+        ws_summary.append(list(row))
+
+    ws_summary.freeze_panes = f"A{header_row + 1}"
+    ws_summary.auto_filter.ref = ws_summary.dimensions
+
+    # ---------------------------------------------------------
+    # PEŁNE SCREENINGI OSÓB
+    # ---------------------------------------------------------
+
+    def add_dict_sheet(title, data, columns=None):
+
+        ws = wb.create_sheet(title)
+
+        rows = []
+
+        for parent_key, details in data.items():
+
+            if isinstance(details, dict):
+                details_list = details.get("details", [])
+                if not details_list and details.get("debug"):
+                    details_list = [{"NIP": parent_key, **details.get("debug", {})}]
+            else:
+                details_list = details
+
+            if not isinstance(details_list, list):
+                details_list = [details_list]
+
+            for detail in details_list:
+                if isinstance(detail, dict):
+                    row = {"NIP / rekord": parent_key, **detail}
+                else:
+                    row = {"NIP / rekord": parent_key, "Dane": str(detail)}
+                rows.append(row)
+
+        if not rows:
+            ws.append(["Brak danych"])
+            return ws
+
+        if columns is None:
+            columns = []
+            for row in rows:
+                for key in row.keys():
+                    if key not in columns:
+                        columns.append(key)
+
+        ws.append(columns)
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+        for row in rows:
+            ws.append([row.get(col, "") for col in columns])
+
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+        return ws
+
+    add_dict_sheet("Screening osób", people_debug)
+    add_dict_sheet("Screening UBO", ubo_debug)
+    add_dict_sheet("CRBR", crbr_debug)
+    add_dict_sheet("Resolver", resolver_debug)
+
+    # ---------------------------------------------------------
+    # FORMATOWANIE
+    # ---------------------------------------------------------
+
+    for ws in wb.worksheets:
+        for column_cells in ws.columns:
+            max_len = 0
+            for cell in column_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, min(len(value), 60))
+            ws.column_dimensions[get_column_letter(column_cells[0].column)].width = max(12, max_len + 2)
+
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue(), checked_at, username
 
 
 
@@ -4167,6 +4319,50 @@ if uploaded_file is not None:
                 f"KRS znaleziono: {found_krs} | "
                 f"Błędy MF: {mf_errors} | "
                 f"Błędy KRS: {krs_errors}"
+            )
+
+            # =================================================
+            # RAPORT XLSX
+            # =================================================
+
+            report_col1, report_col2 = st.columns([2, 1])
+
+            with report_col1:
+                report_username_input = st.text_input(
+                    "Nazwa użytkownika",
+                    value="",
+                    placeholder="np. Jan Kowalski",
+                    help="Nazwa użytkownika zostanie wpisana do raportu. Pole jest opcjonalne."
+                )
+
+            with report_col2:
+                report_bytes, report_checked_at, report_username = build_xlsx_report(
+                    results_df,
+                    people_debug,
+                    ubo_debug,
+                    crbr_debug,
+                    resolver_debug,
+                    report_username_input
+                )
+
+                st.download_button(
+                    label="📥 Pobierz raport",
+                    data=report_bytes,
+                    file_name=(
+                        "raport_screeningu_"
+                        + datetime.now().strftime("%Y%m%d_%H%M%S")
+                        + ".xlsx"
+                    ),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    help=(
+                        "Raport zawiera datę sprawdzenia, nazwę użytkownika, "
+                        "podsumowanie oraz pełne dane screeningu."
+                    )
+                )
+
+            st.caption(
+                f"Raport: {report_checked_at} | użytkownik: {report_username}"
             )
 
             # =================================================
