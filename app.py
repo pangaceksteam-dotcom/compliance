@@ -2914,48 +2914,60 @@ if uploaded_file is not None:
                                 )
 
                             # -------------------------------------
-                            # OSOBY + UBO — OFICJALNY CRBR MF
+                            # OSOBY — KRS
                             # -------------------------------------
+                            #
+                            # Osoby reprezentujące pobieramy z oficjalnego KRS.
+                            # CRBR służy tutaj wyłącznie do beneficjentów rzeczywistych.
+                            # Nie wymagamy, aby CRBR zwracał ListaReprezentantow,
+                            # ponieważ dla części podmiotów CRBR nie udostępnia tej sekcji.
+                            #
 
                             resolved_people = []
                             resolver_details = []
                             resolver_errors = []
-                            crbr_data = {
-                                "people": [],
-                                "ubo": [],
-                                "details": [],
-                                "status": ""
-                            }
 
-                            crbr_people, crbr_status, crbr_data = (
-                                resolve_people_from_crbr(
-                                    result.get("NIP KRS") or nip
+                            if representation_result is not None:
+
+                                krs_people = representation_result.get(
+                                    "Osoby reprezentujące",
+                                    []
                                 )
-                            )
 
-                            if crbr_people:
-                                resolved_people = crbr_people
-                                for person in resolved_people:
-                                    resolver_details.append({
-                                        "Źródło": "CRBR — Ministerstwo Finansów",
-                                        "Osoba": person.get("Osoba", ""),
-                                        "Rodzaj reprezentacji": person.get(
-                                            "Rodzaj reprezentacji",
-                                            person.get("Funkcja", "")
-                                        ),
-                                        "Data urodzenia": person.get(
-                                            "Data urodzenia", ""
-                                        ),
-                                        "Obywatelstwo": person.get(
-                                            "Obywatelstwo", ""
-                                        ),
-                                        "Rezydencja": person.get(
-                                            "Rezydencja", ""
+                                for person in krs_people:
+
+                                    full_name = " ".join(
+                                        part
+                                        for part in (
+                                            first_value(person.get("Imiona"), ""),
+                                            first_value(person.get("Nazwisko"), "")
                                         )
+                                        if part
+                                    ).strip()
+
+                                    if not full_name:
+                                        continue
+
+                                    resolved_people.append({
+                                        "Osoba": full_name,
+                                        "Funkcja": first_value(
+                                            person.get("Funkcja"),
+                                            ""
+                                        ),
+                                        "Rodzaj reprezentacji": first_value(
+                                            person.get("Funkcja"),
+                                            ""
+                                        ),
+                                        "Data urodzenia": "",
+                                        "Obywatelstwo": "",
+                                        "Rezydencja": "",
+                                        "Confidence": 100,
+                                        "Źródło": "KRS — Ministerstwo Sprawiedliwości"
                                     })
+
                             else:
                                 resolver_errors.append(
-                                    f"CRBR — {crbr_status}"
+                                    f"KRS — {representation_status}"
                                 )
 
                             # -------------------------------------
@@ -2963,6 +2975,7 @@ if uploaded_file is not None:
                             # -------------------------------------
 
                             if resolved_people:
+
                                 result["Osoby reprezentujące"] = (
                                     "; ".join(
                                         f"{p.get('Osoba', '')} — {p.get('Funkcja', '')}"
@@ -2971,10 +2984,13 @@ if uploaded_file is not None:
                                 )
 
                                 people_screening = []
+
                                 for person in resolved_people:
+
                                     person_result = screen_person_on_sanctions(
                                         person.get("Osoba", "")
                                     )
+
                                     person_result["Funkcja"] = person.get(
                                         "Funkcja", ""
                                     )
@@ -2996,35 +3012,60 @@ if uploaded_file is not None:
                                     person_result["Źródło"] = person.get(
                                         "Źródło", ""
                                     )
+
                                     people_screening.append(person_result)
 
-                                person_status, person_hits, person_errors = (
-                                    get_people_screening_status(
-                                        people_screening
-                                    )
+                                (
+                                    person_status,
+                                    person_hits,
+                                    person_errors
+                                ) = get_people_screening_status(
+                                    people_screening
                                 )
 
                                 result["Screening osób"] = person_status
                                 result["Osoby trafienia"] = person_hits
 
                                 combined_errors = []
+
                                 if person_errors:
                                     combined_errors.append(person_errors)
+
                                 if resolver_errors:
                                     combined_errors.extend(resolver_errors)
 
                                 result["Osoby błędy"] = "; ".join(
                                     x for x in combined_errors if x
                                 )
+
                                 result["_people_details"] = people_screening
                                 result["_resolver_details"] = resolver_details
+
                             else:
+
                                 result["Screening osób"] = "⚠️ DATA ERROR"
                                 result["Osoby błędy"] = "; ".join(
                                     resolver_errors
-                                    or ["CRBR nie zwrócił osób reprezentujących"]
+                                    or [
+                                        "KRS nie zwrócił osób reprezentujących"
+                                    ]
                                 )
                                 result["_resolver_details"] = resolver_details
+
+                            # -------------------------------------
+                            # CRBR — POBRANIE UBO
+                            # -------------------------------------
+
+                            crbr_data = {
+                                "people": [],
+                                "ubo": [],
+                                "details": [],
+                                "status": ""
+                            }
+
+                            crbr_data, crbr_status = get_crbr_company_data(
+                                result.get("NIP KRS") or nip
+                            )
 
                             # -------------------------------------
                             # BENEFICJENCI RZECZYWIŚCI — CRBR
