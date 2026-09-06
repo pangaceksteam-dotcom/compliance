@@ -3135,6 +3135,114 @@ if uploaded_file is not None:
 
 
                             # -------------------------------------
+                            # SCREENING OSÓB
+                            # -------------------------------------
+
+                            if resolved_people:
+
+                                # Rejestr.io zwrócił jawne osoby.
+                                # Każdą osobę sprawdzamy na tych samych listach
+                                # co kontrahenta.
+                                result["Osoby reprezentujące"] = (
+                                    "; ".join(
+                                        f"{p.get('Osoba', '')} — {p.get('Funkcja', '')}"
+                                        for p in resolved_people
+                                    )
+                                )
+
+                                people_screening = []
+
+                                for person in resolved_people:
+
+                                    person_result = screen_person_on_sanctions(
+                                        person.get("Osoba", "")
+                                    )
+
+                                    person_result["Funkcja"] = person.get(
+                                        "Funkcja", ""
+                                    )
+                                    person_result["Od"] = person.get(
+                                        "Od", ""
+                                    )
+                                    person_result["Confidence"] = person.get(
+                                        "Confidence", ""
+                                    )
+                                    person_result["Źródło"] = person.get(
+                                        "Źródło", ""
+                                    )
+
+                                    people_screening.append(
+                                        person_result
+                                    )
+
+                                person_status, person_hits, person_errors = (
+                                    get_people_screening_status(
+                                        people_screening
+                                    )
+                                )
+
+                                result["Screening osób"] = person_status
+                                result["Osoby trafienia"] = person_hits
+
+                                combined_errors = []
+
+                                if person_errors:
+                                    combined_errors.append(person_errors)
+
+                                if resolver_errors:
+                                    combined_errors.extend(resolver_errors)
+
+                                result["Osoby błędy"] = "; ".join(
+                                    x for x in combined_errors if x
+                                )
+
+                                result["_people_details"] = people_screening
+                                result["_resolver_details"] = resolver_details
+
+                                # Jeżeli część osób nie została pobrana,
+                                # nie uznajemy screeningu osób za CLEAR.
+                                if (
+                                    resolver_errors
+                                    and result["Screening osób"]
+                                    != "🔴 SANCTIONS HIT"
+                                ):
+                                    result["Screening osób"] = "⚠️ DATA ERROR"
+
+                            else:
+
+                                # Rejestr.io nie zwrócił jawnych osób.
+                                # Zostawiamy informację z KRS, ale nie udajemy,
+                                # że screening osób został wykonany.
+                                if osoby:
+                                    result["Osoby reprezentujące"] = (
+                                        "; ".join(
+                                            (
+                                                first_value(
+                                                    m.get("Imiona"), ""
+                                                )
+                                                + " "
+                                                + first_value(
+                                                    m.get("Nazwisko"), ""
+                                                )
+                                                + " — "
+                                                + first_value(
+                                                    m.get("Funkcja"), ""
+                                                )
+                                            ).strip()
+                                            for m in osoby
+                                        )
+                                    )
+
+                                result["Screening osób"] = "⚠️ DATA ERROR"
+                                result["Osoby błędy"] = "; ".join(
+                                    resolver_errors
+                                    or [
+                                        "Nie znaleziono jawnych osób w Rejestr.io"
+                                    ]
+                                )
+                                result["_resolver_details"] = resolver_details
+
+                            # -------------------------------------
                             # SCREENING MSWiA
                             # -------------------------------------
 
