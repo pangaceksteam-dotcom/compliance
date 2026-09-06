@@ -2036,7 +2036,7 @@ def get_crbr_company_data(nip):
     do reprezentowania spółki.
 
     Oficjalny endpoint:
-      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/02/01
+      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01
 
     Wyszukiwanie wykonywane jest po NIP.
     '''
@@ -2053,18 +2053,16 @@ def get_crbr_company_data(nip):
     endpoint = (
         "https://bramka-crbr.mf.gov.pl:5058/"
         "uslugiBiznesowe/uslugiESB/AP/"
-        "ApiPrzegladoweCRBR/2022/02/01"
+        "ApiPrzegladoweCRBR/2022/12/01"
     )
 
     ns_service = (
         "http://www.mf.gov.pl/uslugiBiznesowe/"
-        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/02/01"
+        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/12/01"
     )
-
-    soap_action = ns_service + "/PobierzInformacjeOSpolkachIBeneficjentach"
     ns_schema = (
         "http://www.mf.gov.pl/schematy/AP/"
-        "ApiPrzegladoweCRBR/2022/02/01"
+        "ApiPrzegladoweCRBR/2022/12/01"
     )
 
     soap_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
@@ -2089,52 +2087,42 @@ def get_crbr_company_data(nip):
             endpoint,
             data=soap_xml.encode("utf-8"),
             headers={
-                "Content-Type": (
-                    'application/soap+xml; charset=utf-8; '
-                    f'action="{soap_action}"'
-                ),
+                "Content-Type": "application/soap+xml; charset=utf-8",
                 "Accept": "application/soap+xml, text/xml, */*",
-                "User-Agent": "Mozilla/5.0 (compatible; Compliance-Screening-App/1.0)"
+                "User-Agent": "Compliance Screening App"
             },
-            timeout=30
+            timeout=45
         )
     except requests.RequestException as e:
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — błąd połączenia: {e}"}
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — błąd połączenia: {e}", "debug": {"Endpoint": endpoint, "Request XML": soap_xml, "Response body": ""}}
         return data, data["status"]
 
+    response_text = response.text or ""
+
+    # Zachowujemy pełny request/response do diagnostyki.
+    # Nie pokazujemy go w głównej tabeli — jest dostępny w expanderze debug.
+    debug_details = {
+        "Endpoint": endpoint,
+        "HTTP status": response.status_code,
+        "Response Content-Type": response.headers.get("Content-Type", ""),
+        "Request XML": soap_xml,
+        "Response body": response_text
+    }
+
     if response.status_code != 200:
-        body = response.text.strip()
-        if len(body) > 8000:
-            body = body[:8000] + "\n...[ucięto]"
-        status = f"CRBR HTTP {response.status_code}"
         data = {
             "people": [],
             "ubo": [],
-            "details": [{
-                "HTTP status": response.status_code,
-                "Content-Type": response.headers.get("Content-Type", ""),
-                "Odpowiedź serwera": body
-            }],
-            "status": status
+            "details": [],
+            "status": f"CRBR HTTP {response.status_code}",
+            "debug": debug_details
         }
-        return data, status
+        return data, data["status"]
 
     try:
         root = ET.fromstring(response.content)
     except ET.ParseError as e:
-        body = response.text.strip()
-        if len(body) > 8000:
-            body = body[:8000] + "\n...[ucięto]"
-        data = {
-            "people": [],
-            "ubo": [],
-            "details": [{
-                "HTTP status": response.status_code,
-                "Content-Type": response.headers.get("Content-Type", ""),
-                "Odpowiedź serwera": body
-            }],
-            "status": f"CRBR — nieprawidłowy XML: {e}"
-        }
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — nieprawidłowy XML: {e}", "debug": debug_details}
         return data, data["status"]
 
     def local_name(tag):
@@ -2163,7 +2151,7 @@ def get_crbr_company_data(nip):
         fault_text = " ".join(
             text.strip() for text in fault.itertext() if text and text.strip()
         )
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR SOAP Fault: {fault_text}"}
+        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR SOAP Fault: {fault_text}", "debug": debug_details}
         return data, data["status"]
 
     status_element = next(
@@ -2177,11 +2165,11 @@ def get_crbr_company_data(nip):
     )
 
     if crbr_status == "BrakInformacji":
-        data = {"people": [], "ubo": [], "details": [], "status": "BrakInformacji"}
+        data = {"people": [], "ubo": [], "details": [], "status": "BrakInformacji", "debug": debug_details}
         return data, "Brak informacji w CRBR"
 
     if crbr_status == "BladFormalny":
-        data = {"people": [], "ubo": [], "details": [], "status": "BladFormalny"}
+        data = {"people": [], "ubo": [], "details": [], "status": "BladFormalny", "debug": debug_details}
         return data, "CRBR — błąd formalny zapytania"
 
     company_nodes = [
@@ -2191,7 +2179,7 @@ def get_crbr_company_data(nip):
 
     if not company_nodes:
         status = crbr_status or "Brak danych SpolkaIBeneficjenci"
-        data = {"people": [], "ubo": [], "details": [], "status": status}
+        data = {"people": [], "ubo": [], "details": [], "status": status, "debug": debug_details}
         return data, status
 
     def presentation_date(node):
@@ -2309,6 +2297,7 @@ def get_crbr_company_data(nip):
         "ubo": dedupe_ubo(ubo),
         "details": details,
         "status": crbr_status or "IstniejaInformacje",
+        "debug": debug_details
     }
     return data, "OK — CRBR Ministerstwo Finansów"
 
@@ -3130,9 +3119,10 @@ if uploaded_file is not None:
                                 result["Screening UBO"] = "⚠️ DATA ERROR"
                                 result["UBO błędy"] = f"CRBR — {crbr_status}"
 
-                            result["_crbr_details"] = crbr_data.get(
-                                "details", []
-                            )
+                            result["_crbr_details"] = {
+                                "details": crbr_data.get("details", []),
+                                "debug": crbr_data.get("debug", {})
+                            }
 
                             # -------------------------------------
                             # SCREENING MSWiA
@@ -3624,12 +3614,32 @@ if uploaded_file is not None:
                         key="crbr_debug_nip"
                     )
 
-                    st.dataframe(
-                        pd.DataFrame(
-                            crbr_debug[selected_crbr_nip]
-                        ),
-                        use_container_width=True
-                    )
+                    selected_crbr_debug = crbr_debug[selected_crbr_nip]
+
+                    details = selected_crbr_debug.get("details", []) if isinstance(selected_crbr_debug, dict) else []
+                    debug = selected_crbr_debug.get("debug", {}) if isinstance(selected_crbr_debug, dict) else {}
+
+                    if details:
+                        st.dataframe(
+                            pd.DataFrame(details),
+                            use_container_width=True
+                        )
+
+                    if debug:
+                        st.markdown("**Endpoint**")
+                        st.code(str(debug.get("Endpoint", "")))
+
+                        st.markdown("**HTTP status**")
+                        st.code(str(debug.get("HTTP status", "")))
+
+                        st.markdown("**Response Content-Type**")
+                        st.code(str(debug.get("Response Content-Type", "")))
+
+                        st.markdown("**REQUEST XML wysłany do MF**")
+                        st.code(str(debug.get("Request XML", "")), language="xml")
+
+                        st.markdown("**RESPONSE BODY z MF**")
+                        st.code(str(debug.get("Response body", "")), language="xml")
 
                 else:
 
