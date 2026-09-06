@@ -2684,6 +2684,34 @@ eu_fsf_token = eu_token_manual or get_eu_fsf_token()
 
 
 # =========================================================
+# POMOCNICZE - PUSTE WARTOŚCI Z XLSX
+# =========================================================
+def is_empty_value(value):
+    """
+    Excel/pandas potrafi reprezentować pustą komórkę jako NaN.
+    Traktujemy NaN, None oraz puste/tekstowe warianty braku wartości
+    jako rzeczywiście puste.
+    """
+    if value is None:
+        return True
+
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+
+    value_text = str(value).strip()
+
+    return value_text == "" or value_text.lower() in {
+        "nan",
+        "nat",
+        "none",
+        "null",
+    }
+
+
+# =========================================================
 # UPLOAD XLSX
 # =========================================================
 
@@ -2809,26 +2837,36 @@ if uploaded_file is not None:
                 # NIP
                 # ---------------------------------------------
 
-                nip = str(
-                    row["NIP"]
-                ).strip()
+                raw_nip = row.get("NIP", "")
 
-                nip = (
-                    nip
-                    .replace(" ", "")
-                    .replace("-", "")
-                )
+                # Pusta komórka Excela jest przez pandas często odczytywana
+                # jako NaN. Nie wolno zamieniać jej na tekst "nan", bo wtedy
+                # rekord osoby zostałby błędnie potraktowany jako spółka.
+                if is_empty_value(raw_nip):
+                    nip = ""
+                else:
+                    nip = str(raw_nip).strip()
+
+                    nip = (
+                        nip
+                        .replace(" ", "")
+                        .replace("-", "")
+                    )
 
                 # ---------------------------------------------
                 # NAZWA Z CSV
                 # ---------------------------------------------
 
-                nazwa_csv = str(
-                    row.get(
-                        "Nazwa",
-                        ""
-                    )
-                ).strip()
+                raw_name = row.get(
+                    "Nazwa",
+                    ""
+                )
+
+                nazwa_csv = (
+                    ""
+                    if is_empty_value(raw_name)
+                    else str(raw_name).strip()
+                )
 
                 # Jeżeli NIP jest pusty, traktujemy rekord jako OSOBĘ.
                 # Nie próbujemy szukać jej w KRS/CRBR — od razu screeningujemy
@@ -2869,15 +2907,23 @@ if uploaded_file is not None:
                         continue
 
                     date_of_birth = row.get("Data urodzenia", "")
-                    if pd.isna(date_of_birth):
+
+                    if is_empty_value(date_of_birth):
                         date_of_birth = ""
                     else:
                         date_of_birth = str(date_of_birth).strip()
+
                         # Excel często zwraca datę jako YYYY-MM-DD lub timestamp.
                         try:
-                            parsed_dob = pd.to_datetime(date_of_birth, errors="coerce")
+                            parsed_dob = pd.to_datetime(
+                                date_of_birth,
+                                errors="coerce"
+                            )
+
                             if pd.notna(parsed_dob):
-                                date_of_birth = parsed_dob.strftime("%Y-%m-%d")
+                                date_of_birth = parsed_dob.strftime(
+                                    "%Y-%m-%d"
+                                )
                         except Exception:
                             pass
 
