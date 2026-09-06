@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import os
 import re
+from html.parser import HTMLParser
 from io import BytesIO
 import xml.etree.ElementTree as ET
 from datetime import date
@@ -2098,6 +2099,388 @@ def check_uk_sanctions(
 # STATUS KOŃCOWY SCREENINGU
 # =========================================================
 
+
+# =========================================================
+# REJESTR.IO - PUBLICZNA STRONA / DANE OSÓB
+# =========================================================
+
+class RejestrTextParser(HTMLParser):
+    """Prosty parser tekstu z HTML, bez BeautifulSoup/lxml."""
+
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+
+    def handle_data(self, data):
+        text = re.sub(r"\s+", " ", data).strip()
+        if text:
+            self.parts.append(text)
+
+
+def get_rejestr_io_people(krs):
+    """
+    Pobiera publiczną stronę Rejestr.io dla KRS i próbuje wyciągnąć
+    aktualne osoby z sekcji 'Zarząd / Organ reprezentacji'.
+
+    Nie korzysta z API ani z obchodzenia zabezpieczeń.
+    Jeśli strona nie jest dostępna albo struktura strony się zmieni,
+    zwracany jest błąd zamiast zgadywania danych.
+    """
+
+    krs_clean = re.sub(r"\D", "", str(krs))
+
+    if not krs_clean:
+        return None, "Brak KRS"
+
+    url = f"https://rejestr.io/krs/{krs_clean}/zarzad"
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/131 Safari/537.36 "
+            "ComplianceScreening/1.0"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=20
+        )
+    except Exception as e:
+        return None, f"Rejestr.io błąd połączenia: {e}"
+
+    if response.status_code == 403:
+        return None, "Rejestr.io HTTP 403 — dostęp zabroniony"
+
+    if response.status_code == 429:
+        return None, "Rejestr.io HTTP 429 — zbyt wiele żądań"
+
+    if response.status_code != 200:
+        return None, f"Rejestr.io HTTP {response.status_code}"
+
+    parser = RejestrTextParser()
+
+    try:
+        parser.feed(response.text)
+        lines = parser.parts
+    except Exception as e:
+        return None, f"Błąd parsowania Rejestr.io: {e}"
+
+    # Usuwamy duplikaty zachowując kolejność.
+    clean_lines = []
+    seen = set()
+
+    for line in lines:
+        key = line.casefold()
+        if key not in seen:
+            clean_lines.append(line)
+            seen.add(key)
+
+    lines = clean_lines
+
+    # ---------------------------------------------------------
+    # Szukamy sekcji Zarząd / Organ reprezentacji.
+    # Rejestr.io publikuje tę sekcję jako tekst strony.
+    # ---------------------------------------------------------
+
+    start = None
+
+    for i, line in enumerate(lines):
+        norm = normalize_text(line)
+        if norm in {
+            "ZARZAD ORGAN REPREZENTACJI",
+            "ZARZAD",
+            "ORGAN REPREZENTACJI"
+        }:
+            start = i
+            break
+
+    if start is None:
+        # Fallback: szukamy pierwszej linii zawierającej oba człony.
+        for i, line in enumerate(lines):
+            norm = normalize_text(line)
+            if "ZARZAD" in norm and "ORGAN REPREZENTACJI" in norm:
+                start = i
+                break
+
+    if start is None:
+        return [], "Nie znaleziono sekcji Zarząd / Organ reprezentacji"
+
+    # ---------------------------------------------------------
+    # Koniec sekcji.
+    # ---------------------------------------------------------
+
+    end_markers = {
+        "BRANZE",
+        "SPRAWOZDANIE",
+        "SPRAWOZDANIA",
+        "FAKTY",
+        "BENEFICJENCI RZECZYWIŚCI",
+        "BENEFICJENCI RZECZYWISCI",
+        "WSPOLNICY",
+        "PROKURENCI",
+        "RADA NADZORCZA ORGAN NADZORU",
+        "RADA NADZORCZA"
+    }
+
+    section = []
+
+    for line in lines[start + 1:]:
+        norm = normalize_text(line)
+        if norm in end_markers:
+            break
+        section.append(line.strip())
+
+    # ---------------------------------------------------------
+    # Funkcje, które traktujemy jako role osoby w zarządzie.
+    # ---------------------------------------------------------
+
+    role_patterns = [
+        r"^PREZES(?: ZARZĄDU| ZARZAD)?$",
+        r"^WICEPREZES(?: ZARZĄDU| ZARZAD)?$",
+        r"^WICE PREZES(?: ZARZĄDU| ZARZAD)?$",
+        r"^CZŁONEK(?: ZARZĄDU| ZARZAD)?$",
+        r"^V-CE PREZES(?: ZARZĄDU| ZARZAD)?$",
+        r"^V-CE PREZES$",
+        r"^CZŁONEK RADY ADMINISTRUJĄCEJ$",
+        r"^DYREKTOR(?: ZARZĄDZAJĄCY)?$"
+    ]
+
+    def is_role(text):
+        normalized = normalize_text(text)
+        return any(
+            re.match(pattern, normalized, flags=re.IGNORECASE)
+            for pattern in role_patterns
+        )
+
+    def is_date_line(text):
+        return bool(
+            re.search(
+                r"\bOD\s+\d{1,2}\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+\s+\d{4}",
+                text,
+                flags=re.IGNORECASE
+            )
+        )
+
+    # ---------------------------------------------------------
+    # Parsowanie: osoba -> data -> funkcja.
+    # ---------------------------------------------------------
+
+    people = []
+
+    for idx, line in enumerate(section):
+
+        if not is_role(line):
+            continue
+
+        role = line.strip()
+        person = ""
+        date_from = ""
+
+        # Zwykle układ jest: osoba / Od ... / funkcja.
+        # Szukamy maks. kilku linii wstecz, ale zatrzymujemy się
+        # na oczywistych nagłówkach.
+        for back in range(1, 6):
+            pos = idx - back
+            if pos < 0:
+                break
+
+            candidate = section[pos].strip()
+            candidate_norm = normalize_text(candidate)
+
+            if candidate_norm in {
+                "SPOSOB REPREZENTACJI",
+                "ZARZAD",
+                "ORGAN REPREZENTACJI"
+            }:
+                break
+
+            if is_date_line(candidate):
+                date_from = candidate
+                continue
+
+            # Pomijamy tekst reprezentacji / komunikaty nawigacyjne.
+            if len(candidate) < 3:
+                continue
+
+            if candidate.startswith("Zobacz "):
+                continue
+
+            if candidate_norm in end_markers:
+                break
+
+            # Najbliższa sensowna linia tekstowa przed datą/rolą
+            # traktowana jest jako osoba.
+            person = candidate
+            break
+
+        if person:
+            # Odrzucamy przypadkowe zdania, jeśli parser trafił
+            # w nietypową strukturę HTML.
+            if len(person) <= 120 and not re.search(r"[.!?]$", person):
+                people.append({
+                    "Osoba": person,
+                    "Funkcja": role,
+                    "Od": date_from
+                })
+
+    # Dedup.
+    unique = []
+    seen_people = set()
+
+    for person in people:
+        key = (
+            normalize_text(person["Osoba"]),
+            normalize_text(person["Funkcja"])
+        )
+        if key not in seen_people:
+            unique.append(person)
+            seen_people.add(key)
+
+    return unique, "OK" if unique else "Nie znaleziono osób w sekcji Zarząd"
+
+
+def screen_person_on_sanctions(person_name):
+    """
+    Screening jednej osoby po pełnym imieniu i nazwisku.
+
+    Używamy tych samych oficjalnych list, które są już załadowane
+    dla kontrahenta. Nie próbujemy dopasowywać osoby po NIP/KRS.
+    """
+
+    result = {
+        "Osoba": person_name,
+        "MSWiA": "",
+        "MSWiA dopasowanie": "",
+        "GIIF": "",
+        "GIIF dopasowanie": "",
+        "UE": "",
+        "UE dopasowanie": "",
+        "UK": "",
+        "UK dopasowanie": "",
+        "USA": "",
+        "USA dopasowanie": ""
+    }
+
+    # MSWiA — nazwa osoby, brak NIP/KRS.
+    try:
+        mswia_result, mswia_status = check_mswiA_sanctions(
+            person_name, "", ""
+        )
+        if mswia_result is None:
+            result["MSWiA"] = "BŁĄD"
+            result["MSWiA dopasowanie"] = mswia_status
+        else:
+            result["MSWiA"] = mswia_result.get("status", "")
+            result["MSWiA dopasowanie"] = mswia_result.get("powod", "")
+    except Exception as e:
+        result["MSWiA"] = "BŁĄD"
+        result["MSWiA dopasowanie"] = str(e)
+
+    # GIIF
+    try:
+        giif_result, giif_status = check_giif_sanctions(
+            person_name, "", ""
+        )
+        if giif_result is None:
+            result["GIIF"] = "BŁĄD"
+            result["GIIF dopasowanie"] = giif_status
+        else:
+            result["GIIF"] = giif_result.get("status", "")
+            result["GIIF dopasowanie"] = giif_result.get("powod", "")
+    except Exception as e:
+        result["GIIF"] = "BŁĄD"
+        result["GIIF dopasowanie"] = str(e)
+
+    # EU
+    try:
+        eu_result, eu_status = check_eu_sanctions(
+            person_name, "", "", eu_fsf_token
+        )
+        if eu_result is None:
+            result["EU"] = "BŁĄD"
+            result["EU dopasowanie"] = eu_status
+        else:
+            result["EU"] = eu_result.get("status", "")
+            result["EU dopasowanie"] = eu_result.get("powod", "")
+    except Exception as e:
+        result["EU"] = "BŁĄD"
+        result["EU dopasowanie"] = str(e)
+
+    # UK
+    try:
+        uk_result, uk_status = check_uk_sanctions(
+            person_name, "", ""
+        )
+        if uk_result is None:
+            result["UK"] = "BŁĄD"
+            result["UK dopasowanie"] = uk_status
+        else:
+            result["UK"] = uk_result.get("status", "")
+            result["UK dopasowanie"] = uk_result.get("powod", "")
+    except Exception as e:
+        result["UK"] = "BŁĄD"
+        result["UK dopasowanie"] = str(e)
+
+    # OFAC
+    try:
+        ofac_result, ofac_status = check_ofac_sanctions(
+            person_name, "", ""
+        )
+        if ofac_result is None:
+            result["USA"] = "BŁĄD"
+            result["USA dopasowanie"] = ofac_status
+        else:
+            result["USA"] = ofac_result.get("status", "")
+            result["USA dopasowanie"] = ofac_result.get("powod", "")
+    except Exception as e:
+        result["USA"] = "BŁĄD"
+        result["USA dopasowanie"] = str(e)
+
+    return result
+
+
+def get_people_screening_status(people_results):
+    """Agreguje wynik screeningu osób reprezentujących."""
+
+    if not people_results:
+        return "", "", ""
+
+    hits = []
+    errors = []
+
+    source_map = [
+        ("MSWiA", "MSWiA"),
+        ("GIIF", "GIIF"),
+        ("EU", "EU"),
+        ("UK", "UK"),
+        ("USA", "USA")
+    ]
+
+    for person in people_results:
+        person_name = person.get("Osoba", "")
+
+        for field, label in source_map:
+            value = str(person.get(field, "")).strip().upper()
+
+            if value == "ZNALEZIONO":
+                hits.append(f"{person_name} — {label}")
+            elif value == "BŁĄD":
+                errors.append(f"{person_name} — {label}")
+
+    if hits:
+        return "🔴 SANCTIONS HIT", "; ".join(hits), "; ".join(errors)
+
+    if errors:
+        return "⚠️ DATA ERROR", "", "; ".join(errors)
+
+    return "🟢 CLEAR", "", ""
+
+
 def get_final_screening_status(row):
 
     sources = [
@@ -2123,14 +2506,27 @@ def get_final_screening_status(row):
         elif value == "BŁĄD":
             errors.append(source.replace(" sankcje", ""))
 
+    # Screening osób reprezentujących ma taki sam priorytet jak screening spółki.
+    person_status = str(row.get("Screening osób", "")).strip()
+
+    if person_status == "🔴 SANCTIONS HIT":
+        person_hits = str(row.get("Osoby trafienia", "")).strip()
+        if person_hits:
+            hits.append("OSOBY: " + person_hits)
+
+    elif person_status == "⚠️ DATA ERROR":
+        person_errors = str(row.get("Osoby błędy", "")).strip()
+        if person_errors:
+            errors.append("OSOBY: " + person_errors)
+
     # Trafienie ma najwyższy priorytet.
     if hits:
-        return "🔴 SANCTIONS HIT", ", ".join(hits), ", ".join(errors)
+        return "🔴 SANCTIONS HIT", "; ".join(hits), "; ".join(errors)
 
     # Jeżeli którekolwiek źródło było niedostępne, nie oznaczamy
     # kontrahenta jako CLEAR.
     if errors:
-        return "⚠️ DATA ERROR", "", ", ".join(errors)
+        return "⚠️ DATA ERROR", "", "; ".join(errors)
 
     return "🟢 CLEAR", "", ""
 
@@ -2304,7 +2700,9 @@ if uploaded_file is not None:
                     "Sposób reprezentacji": "",
 
                     "Osoby reprezentujące": "",
-
+                    "Screening osób": "",
+                    "Osoby trafienia": "",
+                    "Osoby błędy": "",
                     "MSWiA sankcje": "",
 
                     "MSWiA dopasowanie": "",
@@ -2429,6 +2827,79 @@ if uploaded_file is not None:
                                         for osoba in osoby
                                     )
                                 )
+
+                            # -------------------------------------
+                            # REJESTR.IO — AKTUALNE OSOBY
+                            # -------------------------------------
+
+                            rejestr_people, rejestr_status = (
+                                get_rejestr_io_people(
+                                    krs
+                                )
+                            )
+
+                            if rejestr_people is None:
+
+                                result["Osoby reprezentujące"] = (
+                                    "BŁĄD Rejestr.io: "
+                                    + rejestr_status
+                                )
+
+                                result["Screening osób"] = (
+                                    "⚠️ DATA ERROR"
+                                )
+
+                                result["Osoby błędy"] = rejestr_status
+
+                            else:
+
+                                if rejestr_people:
+
+                                    result["Osoby reprezentujące"] = (
+                                        "; ".join(
+                                            f"{p['Osoba']} — {p['Funkcja']}"
+                                            for p in rejestr_people
+                                        )
+                                    )
+
+                                    people_screening = []
+
+                                    for person in rejestr_people:
+
+                                        person_result = (
+                                            screen_person_on_sanctions(
+                                                person["Osoba"]
+                                            )
+                                        )
+
+                                        person_result["Funkcja"] = person["Funkcja"]
+                                        person_result["Od"] = person.get("Od", "")
+                                        people_screening.append(person_result)
+
+                                    person_status, person_hits, person_errors = (
+                                        get_people_screening_status(
+                                            people_screening
+                                        )
+                                    )
+
+                                    result["Screening osób"] = person_status
+                                    result["Osoby trafienia"] = person_hits
+                                    result["Osoby błędy"] = person_errors
+
+                                    # Szczegóły do pokazania poniżej.
+                                    result["_people_details"] = people_screening
+
+                                else:
+
+                                    result["Osoby reprezentujące"] = (
+                                        "Nie znaleziono osób w Rejestr.io"
+                                    )
+
+                                    result["Screening osób"] = (
+                                        "⚠️ DATA ERROR"
+                                    )
+
+                                    result["Osoby błędy"] = rejestr_status
 
                             # -------------------------------------
                             # SCREENING MSWiA
@@ -2728,6 +3199,13 @@ if uploaded_file is not None:
 
             status_text.empty()
 
+            # Szczegóły screeningu osób trzymamy poza główną tabelą.
+            people_debug = {}
+            for item in results:
+                if item.get("_people_details"):
+                    people_debug[item.get("NIP", "")] = item["_people_details"]
+                item.pop("_people_details", None)
+
             results_df = pd.DataFrame(
                 results
             )
@@ -2833,6 +3311,37 @@ if uploaded_file is not None:
                 f"Błędy MF: {mf_errors} | "
                 f"Błędy KRS: {krs_errors}"
             )
+
+            # =================================================
+            # SCREENING OSÓB — SZCZEGÓŁY
+            # =================================================
+
+            st.divider()
+
+            with st.expander(
+                "👤 Screening osób reprezentujących"
+            ):
+
+                if people_debug:
+
+                    selected_people_nip = st.selectbox(
+                        "Wybierz NIP:",
+                        list(people_debug.keys()),
+                        key="people_debug_nip"
+                    )
+
+                    st.dataframe(
+                        pd.DataFrame(
+                            people_debug[selected_people_nip]
+                        ),
+                        use_container_width=True
+                    )
+
+                else:
+
+                    st.write(
+                        "Brak danych osób pobranych z Rejestr.io."
+                    )
 
             # =================================================
             # DEBUG
