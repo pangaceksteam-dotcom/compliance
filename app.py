@@ -969,6 +969,106 @@ def get_uk_screen_index():
     ), status
 
 
+def _person_name_tokens(value):
+    """Zwraca tokeny nazwiska/imienia po normalizacji."""
+    text = normalize_text(value)
+    return [t for t in text.split() if t]
+
+
+def _dob_variants(value):
+    """Buduje warianty DOB spotykane na listach sankcyjnych."""
+    if not value or is_empty_value(value):
+        return []
+
+    raw = str(value).strip()
+    try:
+        dt = pd.to_datetime(raw, errors="coerce", dayfirst=True)
+        if pd.notna(dt):
+            months = [
+                "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"
+            ]
+            return [
+                normalize_text(dt.strftime("%d %B %Y")),
+                normalize_text(dt.strftime("%-d %B %Y")),
+                normalize_text(dt.strftime("%d %b %Y")),
+                normalize_text(dt.strftime("%-d %b %Y")),
+                normalize_text(dt.strftime("%Y-%m-%d")),
+                normalize_text(dt.strftime("%d-%m-%Y")),
+                normalize_text(f"{dt.day:02d} {months[dt.month-1]} {dt.year}"),
+                normalize_text(f"{dt.day} {months[dt.month-1]} {dt.year}"),
+            ]
+    except Exception:
+        pass
+
+    return [normalize_text(raw)]
+
+
+def _person_match_in_index(index, person_name, dob=""):
+    """
+    Dopasowanie osoby odporne na kolejność imię/nazwisko, dodatkowe imiona
+    oraz typowe transliteracje (np. Andrey/Andrei). DOB jest dodatkowym
+    identyfikatorem, ale pozostaje opcjonalne.
+    """
+    if index is None or not person_name:
+        return None, "", {}
+
+    import difflib
+
+    query_tokens = _person_name_tokens(person_name)
+    if len(query_tokens) < 2:
+        return "NIE ZNALEZIONO", "", {}
+
+    # Najczęściej ostatni token jest nazwiskiem. Szukamy go dokładnie,
+    # niezależnie od kolejności pól w źródle (np. MELNICHENKO, Andrey).
+    surname = query_tokens[-1]
+    first_tokens = query_tokens[:-1]
+    dob_vars = _dob_variants(dob)
+
+    candidates = []
+    for _, row in index.iterrows():
+        row_norm = str(row.get("_screen_norm", ""))
+        row_tokens = set(row_norm.split())
+        if surname not in row_tokens:
+            continue
+
+        # Imiona: wymagamy sensownego podobieństwa przynajmniej jednego
+        # tokenu zapytania. Pozwala to np. na ANDREY ↔ ANDREI.
+        first_score = 0.0
+        matched_first = False
+        for q in first_tokens:
+            best = max(
+                (difflib.SequenceMatcher(None, q, r).ratio() for r in row_tokens),
+                default=0.0
+            )
+            if best >= 0.82:
+                matched_first = True
+                first_score = max(first_score, best)
+
+        if not matched_first:
+            continue
+
+        dob_hit = False
+        if dob_vars:
+            dob_hit = any(v and v in row_norm for v in dob_vars)
+
+        # DOB mocno podbija wynik; bez DOB nadal możemy dopasować po nazwie.
+        score = 100.0 + (40.0 if dob_hit else 0.0) + first_score
+        candidates.append((score, dob_hit, row))
+
+    if not candidates:
+        return "NIE ZNALEZIONO", "", {}
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, dob_hit, row = candidates[0]
+
+    reason = "OSOBA — imię/nazwisko"
+    if dob_hit:
+        reason += " + DATA URODZENIA"
+
+    return "ZNALEZIONO", reason, row.to_dict()
+
+
 def _fast_find_in_index(
     index,
     name,
@@ -1057,13 +1157,18 @@ def check_mswiA_sanctions(
     if sanctions is None:
         return None, status
 
-    matched_status, reason, wpis = _fast_find_in_index(
-        sanctions,
-        name,
-        nip,
-        krs,
-        dob=dob
-    )
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
+    else:
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            dob=dob
+        )
 
     return {
         "status": matched_status,
@@ -1322,13 +1427,18 @@ def check_giif_sanctions(
     if sanctions is None:
         return None, status
 
-    matched_status, reason, wpis = _fast_find_in_index(
-        sanctions,
-        name,
-        nip,
-        krs,
-        dob=dob
-    )
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
+    else:
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            dob=dob
+        )
 
     return {
         "status": matched_status,
@@ -1646,13 +1756,18 @@ def check_eu_sanctions(
     if sanctions is None:
         return None, status
 
-    matched_status, reason, wpis = _fast_find_in_index(
-        sanctions,
-        name,
-        nip,
-        krs,
-        dob=dob
-    )
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
+    else:
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            dob=dob
+        )
 
     return {
         "status": matched_status,
@@ -1864,20 +1979,19 @@ def check_ofac_sanctions(
     if sanctions is None:
         return None, status
 
-    matched_status, reason, wpis = _fast_find_in_index(
-        sanctions,
-        name,
-        nip,
-        krs,
-        list_name=(
-            first_value(
-                wpis.get("OFAC lista")
-            )
-            if False
-            else ""
-        ),
-        dob=dob
-    )
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
+    else:
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            list_name="",
+            dob=dob
+        )
 
     # OFAC podaje typ listy w rekordzie. Dodajemy go do powodu
     # dla trafienia, bez drugiego przejścia po całej liście.
@@ -2013,13 +2127,18 @@ def check_uk_sanctions(
     if sanctions is None:
         return None, status
 
-    matched_status, reason, wpis = _fast_find_in_index(
-        sanctions,
-        name,
-        nip,
-        krs,
-        dob=dob
-    )
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
+    else:
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            dob=dob
+        )
 
     return {
         "status": matched_status,
