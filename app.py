@@ -2543,6 +2543,45 @@ def get_people_screening_status(people_results):
 
 
 
+# =========================================================
+# SPÓŁKI PUBLICZNE / CRBR
+# =========================================================
+
+# PZU SA jest spółką publiczną i zgodnie z informacją MF nie ma
+# obowiązku zgłaszania beneficjentów rzeczywistych do CRBR.
+# Lista może być rozszerzana o kolejne podmioty publiczne, jeżeli
+# chcemy mieć lokalny, deterministyczny fallback.
+PUBLIC_COMPANY_NIPS = {
+    "5260251049",  # PZU SA
+}
+
+PUBLIC_COMPANY_KRS = {
+    "0000009831",  # PZU SA
+}
+
+def is_public_company(nip="", krs="", name=""):
+    nip_norm = normalize_nip(nip) if nip else ""
+    krs_norm = re.sub(r"\D", "", str(krs or ""))
+    name_norm = normalize_text(name or "")
+
+    if nip_norm in PUBLIC_COMPANY_NIPS:
+        return True
+
+    if krs_norm in PUBLIC_COMPANY_KRS:
+        return True
+
+    # Ostrożny fallback dla PZU SA, gdyby identyfikator nie był dostępny.
+    if name_norm in {
+        "PZU SA",
+        "PZU S.A.",
+        "POWSZECHNY ZAKLAD UBEZPIECZEN SA",
+        "POWSZECHNY ZAKLAD UBEZPIECZEN SPOLKA AKCYJNA",
+    }:
+        return True
+
+    return False
+
+
 def get_final_screening_status(row):
 
     sources = [
@@ -2581,7 +2620,8 @@ def get_final_screening_status(row):
         if person_errors:
             errors.append("OSOBY: " + person_errors)
 
-    # Screening beneficjentów rzeczywistych ma taki sam priorytet.
+    # Screening beneficjentów rzeczywistych ma taki sam priorytet,
+    # z wyjątkiem spółki publicznej: brak CRBR jest wtedy oczekiwany.
     ubo_status = str(
         row.get("Screening UBO", "")
     ).strip()
@@ -2784,6 +2824,7 @@ if uploaded_file is not None:
                     "Screening osób": "",
                     "Osoby trafienia": "",
                     "Osoby błędy": "",
+                    "Spółka publiczna": "",
                     "Beneficjenci rzeczywiści": "",
                     "Screening UBO": "",
                     "UBO trafienia": "",
@@ -3053,6 +3094,20 @@ if uploaded_file is not None:
                                 result["_resolver_details"] = resolver_details
 
                             # -------------------------------------
+                            # STATUS SPÓŁKI PUBLICZNEJ
+                            # -------------------------------------
+
+                            public_company = is_public_company(
+                                result.get("NIP KRS") or nip,
+                                krs,
+                                result.get("Nazwa KRS", "")
+                            )
+
+                            result["Spółka publiczna"] = (
+                                "TAK" if public_company else "NIE"
+                            )
+
+                            # -------------------------------------
                             # CRBR — POBRANIE UBO
                             # -------------------------------------
 
@@ -3114,8 +3169,19 @@ if uploaded_file is not None:
                                 result["UBO błędy"] = ubo_errors_text
                                 result["_ubo_details"] = ubo_details
                             else:
-                                result["Screening UBO"] = "⚠️ DATA ERROR"
-                                result["UBO błędy"] = f"CRBR — {crbr_status}"
+                                if public_company and crbr_status == "Brak informacji w CRBR":
+                                    # Spółki publiczne są wyłączone z obowiązku raportowania
+                                    # do CRBR. Brak wpisu nie jest błędem danych.
+                                    result["Beneficjenci rzeczywiści"] = (
+                                        "N/D — spółka publiczna, brak obowiązku wpisu do CRBR"
+                                    )
+                                    result["Screening UBO"] = (
+                                        "ℹ️ N/D — SPÓŁKA PUBLICZNA"
+                                    )
+                                    result["UBO błędy"] = ""
+                                else:
+                                    result["Screening UBO"] = "⚠️ DATA ERROR"
+                                    result["UBO błędy"] = f"CRBR — {crbr_status}"
 
                             result["_crbr_details"] = {
                                 "details": crbr_data.get("details", []),
