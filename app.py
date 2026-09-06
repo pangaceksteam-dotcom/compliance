@@ -66,7 +66,7 @@ with st.sidebar:
             "Klucz API Rejestr.io. "
             "Najbezpieczniej przechowywać go w Streamlit Secrets "
             "jako REJESTR_IO_API_KEY. "
-            "Pole ręczne nie jest zapisywane w repozytorium."
+            "Pole ręczne nie jest zapisywane w repozytorium. Odpytanie Rejestr.io jest cache'owane przez 1 godzinę."
         )
     ).strip()
 
@@ -871,112 +871,216 @@ def get_mswiA_sanctions():
         )
 
 
+def _build_screen_index(sanctions, row_text_column=None, mswia=False):
+    """
+    Buduje szybki indeks tekstowy dla listy sankcyjnej.
+
+    W poprzedniej wersji każda osoba powodowała iterację po całym
+    DataFrame i normalizację każdego wiersza od nowa. Przy kilku osobach
+    w zarządzie było to niepotrzebnie kosztowne.
+
+    Teraz tekst i jego normalizacja są liczone raz, a wyszukiwanie
+    odbywa się wektorowo przez pandas.str.contains().
+    """
+
+    if sanctions is None:
+        return None
+
+    df = sanctions.copy()
+
+    if row_text_column and row_text_column in df.columns:
+        df["_screen_text"] = (
+            df[row_text_column]
+            .fillna("")
+            .astype(str)
+        )
+    else:
+        df["_screen_text"] = df.apply(
+            lambda row: " ".join(
+                str(value)
+                for value in row.tolist()
+                if pd.notna(value)
+            ),
+            axis=1
+        )
+
+    df["_screen_norm"] = df["_screen_text"].map(
+        normalize_text
+    )
+
+    if mswia:
+        deleted_mask = pd.Series(
+            False,
+            index=df.index
+        )
+
+        for column in df.columns:
+            column_norm = normalize_text(column)
+
+            if "DATA WYKRESLENIA" in column_norm:
+                deleted_mask = deleted_mask | (
+                    df[column]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .ne("")
+                )
+
+        df = df.loc[~deleted_mask].copy()
+
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_mswiA_screen_index():
+    sanctions, status = get_mswiA_sanctions()
+
+    if sanctions is None:
+        return None, status
+
+    return _build_screen_index(
+        sanctions,
+        row_text_column=None,
+        mswia=True
+    ), status
+
+
+@st.cache_data(ttl=3600)
+def get_giif_screen_index():
+    sanctions, status = get_giif_sanctions()
+
+    if sanctions is None:
+        return None, status
+
+    return _build_screen_index(
+        sanctions
+    ), status
+
+
+@st.cache_data(ttl=3600)
+def get_eu_screen_index(token):
+    sanctions, status = get_eu_sanctions(token)
+
+    if sanctions is None:
+        return None, status
+
+    return _build_screen_index(
+        sanctions,
+        row_text_column="_EU row text"
+    ), status
+
+
+@st.cache_data(ttl=3600)
+def get_ofac_screen_index():
+    sanctions, status = get_ofac_sanctions()
+
+    if sanctions is None:
+        return None, status
+
+    return _build_screen_index(
+        sanctions,
+        row_text_column="_OFAC row text"
+    ), status
+
+
+@st.cache_data(ttl=3600)
+def get_uk_screen_index():
+    sanctions, status = get_uk_sanctions()
+
+    if sanctions is None:
+        return None, status
+
+    return _build_screen_index(
+        sanctions,
+        row_text_column="_UK row text"
+    ), status
+
+
+def _fast_find_in_index(
+    index,
+    name,
+    nip,
+    krs,
+    list_name="",
+):
+    """
+    Zwraca (status, powod, wpis) z indeksu.
+    Zachowuje priorytet: NIP -> KRS -> NAZWA.
+    """
+
+    if index is None:
+        return None, "", {}
+
+    name_norm = normalize_text(name)
+    nip_norm = normalize_text(nip)
+    krs_norm = normalize_text(krs)
+
+    tests = [
+        (nip_norm, "NIP"),
+        (krs_norm, "KRS"),
+    ]
+
+    if name_norm and len(name_norm) >= 5:
+        tests.append(
+            (name_norm, "NAZWA")
+        )
+
+    for needle, reason in tests:
+
+        if not needle:
+            continue
+
+        mask = index["_screen_norm"].str.contains(
+            re.escape(needle),
+            regex=True,
+            na=False
+        )
+
+        if not mask.any():
+            continue
+
+        row = index.loc[mask].iloc[0]
+
+        if list_name:
+            reason = f"{reason} ({list_name})"
+
+        return (
+            "ZNALEZIONO",
+            reason,
+            row.to_dict()
+        )
+
+    return (
+        "NIE ZNALEZIONO",
+        "",
+        {}
+    )
+
+
 def check_mswiA_sanctions(
     name,
     nip,
     krs
 ):
 
-    sanctions, status = (
-        get_mswiA_sanctions()
-    )
+    sanctions, status = get_mswiA_screen_index()
 
     if sanctions is None:
-
         return None, status
 
-    name_norm = normalize_text(
-        name
-    )
-
-    nip_norm = normalize_text(
-        nip
-    )
-
-    krs_norm = normalize_text(
+    matched_status, reason, wpis = _fast_find_in_index(
+        sanctions,
+        name,
+        nip,
         krs
     )
 
-    for _, row in sanctions.iterrows():
-
-        row_values = [
-            str(value)
-            for value in row.tolist()
-            if pd.notna(value)
-        ]
-
-        row_text = " ".join(
-            row_values
-        )
-
-        row_norm = normalize_text(
-            row_text
-        )
-
-        # Pomijamy wpisy wykreślone z listy,
-        # jeżeli tabela zawiera datę wykreślenia.
-        deleted = False
-
-        for column in sanctions.columns:
-
-            column_norm = normalize_text(
-                column
-            )
-
-            if "DATA WYKRESLENIA" in column_norm:
-
-                value = row.get(
-                    column,
-                    ""
-                )
-
-                if pd.notna(value) and str(
-                    value
-                ).strip():
-
-                    deleted = True
-
-                    break
-
-        if deleted:
-            continue
-
-        # Najpierw najmocniejsze identyfikatory:
-        # NIP lub KRS.
-        if nip_norm and nip_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NIP",
-                "wpis": row.to_dict()
-            }, "OK"
-
-        if krs_norm and krs_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "KRS",
-                "wpis": row.to_dict()
-            }, "OK"
-
-        # Nazwę traktujemy jako słabsze dopasowanie.
-        if (
-            name_norm
-            and len(name_norm) >= 5
-            and name_norm in row_norm
-        ):
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NAZWA",
-                "wpis": row.to_dict()
-            }, "OK"
-
     return {
-        "status": "NIE ZNALEZIONO",
-        "powod": "",
-        "wpis": {}
-    }, "OK"
+        "status": matched_status,
+        "powod": reason,
+        "wpis": wpis
+    }, status
+
 
 
 # =========================================================
@@ -1222,75 +1326,24 @@ def check_giif_sanctions(
     krs
 ):
 
-    sanctions, status = (
-        get_giif_sanctions()
-    )
+    sanctions, status = get_giif_screen_index()
 
     if sanctions is None:
-
         return None, status
 
-    name_norm = normalize_text(
-        name
-    )
-
-    nip_norm = normalize_text(
-        nip
-    )
-
-    krs_norm = normalize_text(
+    matched_status, reason, wpis = _fast_find_in_index(
+        sanctions,
+        name,
+        nip,
         krs
     )
 
-    for _, row in sanctions.iterrows():
-
-        row_values = [
-            str(value)
-            for value in row.tolist()
-            if pd.notna(value)
-        ]
-
-        row_text = " ".join(
-            row_values
-        )
-
-        row_norm = normalize_text(
-            row_text
-        )
-
-        if nip_norm and nip_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NIP",
-                "wpis": row.to_dict()
-            }, "OK"
-
-        if krs_norm and krs_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "KRS",
-                "wpis": row.to_dict()
-            }, "OK"
-
-        if (
-            name_norm
-            and len(name_norm) >= 5
-            and name_norm in row_norm
-        ):
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NAZWA",
-                "wpis": row.to_dict()
-            }, "OK"
-
     return {
-        "status": "NIE ZNALEZIONO",
-        "powod": "",
-        "wpis": {}
-    }, "OK"
+        "status": matched_status,
+        "powod": reason,
+        "wpis": wpis
+    }, status
+
 
 
 # =========================================================
@@ -1595,90 +1648,24 @@ def check_eu_sanctions(
     token
 ):
 
-    sanctions, status = (
-        get_eu_sanctions(
-            token
-        )
-    )
+    sanctions, status = get_eu_screen_index(token)
 
     if sanctions is None:
-
         return None, status
 
-    name_norm = normalize_text(
-        name
-    )
-
-    nip_norm = normalize_text(
-        nip
-    )
-
-    krs_norm = normalize_text(
+    matched_status, reason, wpis = _fast_find_in_index(
+        sanctions,
+        name,
+        nip,
         krs
     )
 
-    # Dla XML 1.1 mamy przygotowaną jedną kolumnę z pełną treścią
-    # danego Entity. Dla CSV budujemy tekst z całego rekordu.
-    for _, row in sanctions.iterrows():
-
-        if "_EU row text" in sanctions.columns:
-
-            row_text = str(
-                row.get(
-                    "_EU row text",
-                    ""
-                )
-            )
-
-        else:
-
-            row_values = [
-                str(value)
-                for value in row.tolist()
-                if pd.notna(value)
-            ]
-
-            row_text = " ".join(
-                row_values
-            )
-
-        row_norm = normalize_text(
-            row_text
-        )
-
-        if nip_norm and nip_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NIP",
-                "wpis": row.to_dict()
-            }, status
-
-        if krs_norm and krs_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "KRS",
-                "wpis": row.to_dict()
-            }, status
-
-        if (
-            name_norm
-            and len(name_norm) >= 5
-            and name_norm in row_norm
-        ):
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NAZWA",
-                "wpis": row.to_dict()
-            }, status
-
     return {
-        "status": "NIE ZNALEZIONO",
-        "powod": "",
-        "wpis": {}
+        "status": matched_status,
+        "powod": reason,
+        "wpis": wpis
     }, status
+
 
 
 # =========================================================
@@ -1877,78 +1864,40 @@ def check_ofac_sanctions(
     krs
 ):
 
-    sanctions, status = (
-        get_ofac_sanctions()
-    )
+    sanctions, status = get_ofac_screen_index()
 
     if sanctions is None:
-
         return None, status
 
-    name_norm = normalize_text(
-        name
-    )
-
-    nip_norm = normalize_text(
-        nip
-    )
-
-    krs_norm = normalize_text(
-        krs
-    )
-
-    for _, row in sanctions.iterrows():
-
-        row_text = str(
-            row.get(
-                "_OFAC row text",
-                ""
+    matched_status, reason, wpis = _fast_find_in_index(
+        sanctions,
+        name,
+        nip,
+        krs,
+        list_name=(
+            first_value(
+                wpis.get("OFAC lista")
             )
+            if False
+            else ""
         )
+    )
 
-        row_norm = normalize_text(
-            row_text
-        )
-
+    # OFAC podaje typ listy w rekordzie. Dodajemy go do powodu
+    # dla trafienia, bez drugiego przejścia po całej liście.
+    if matched_status == "ZNALEZIONO":
         list_name = first_value(
-            row.get(
-                "OFAC lista"
-            )
+            wpis.get("OFAC lista")
         )
-
-        if nip_norm and nip_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": f"NIP ({list_name})",
-                "wpis": row.to_dict()
-            }, status
-
-        if krs_norm and krs_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": f"KRS ({list_name})",
-                "wpis": row.to_dict()
-            }, status
-
-        if (
-            name_norm
-            and len(name_norm) >= 5
-            and name_norm in row_norm
-        ):
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": f"NAZWA ({list_name})",
-                "wpis": row.to_dict()
-            }, status
+        if list_name:
+            reason = f"{reason} ({list_name})"
 
     return {
-        "status": "NIE ZNALEZIONO",
-        "powod": "",
-        "wpis": {}
+        "status": matched_status,
+        "powod": reason,
+        "wpis": wpis
     }, status
+
 
 
 # =========================================================
@@ -2062,72 +2011,24 @@ def check_uk_sanctions(
     krs
 ):
 
-    sanctions, status = (
-        get_uk_sanctions()
-    )
+    sanctions, status = get_uk_screen_index()
 
     if sanctions is None:
-
         return None, status
 
-    name_norm = normalize_text(
-        name
-    )
-
-    nip_norm = normalize_text(
-        nip
-    )
-
-    krs_norm = normalize_text(
+    matched_status, reason, wpis = _fast_find_in_index(
+        sanctions,
+        name,
+        nip,
         krs
     )
 
-    for _, row in sanctions.iterrows():
-
-        row_text = str(
-            row.get(
-                "_UK row text",
-                ""
-            )
-        )
-
-        row_norm = normalize_text(
-            row_text
-        )
-
-        if nip_norm and nip_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NIP",
-                "wpis": row.to_dict()
-            }, status
-
-        if krs_norm and krs_norm in row_norm:
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "KRS",
-                "wpis": row.to_dict()
-            }, status
-
-        if (
-            name_norm
-            and len(name_norm) >= 5
-            and name_norm in row_norm
-        ):
-
-            return {
-                "status": "ZNALEZIONO",
-                "powod": "NAZWA",
-                "wpis": row.to_dict()
-            }, status
-
     return {
-        "status": "NIE ZNALEZIONO",
-        "powod": "",
-        "wpis": {}
+        "status": matched_status,
+        "powod": reason,
+        "wpis": wpis
     }, status
+
 
 
 # =========================================================
@@ -2462,6 +2363,7 @@ def google_search_people(krs, company_name, role, masked_person):
 
     return [], " | ".join(errors)
 
+@st.cache_data(ttl=3600)
 def get_rejestr_io_people(krs, api_key):
     """
     Pobiera aktualne osoby powiązane z organizacją z Rejestr.io.
@@ -2759,7 +2661,7 @@ def get_people_screening_status(people_results):
         return "", "", ""
 
     hits = []
-    errors = []
+    errors_by_source = {}
 
     source_map = [
         ("MSWiA", "MSWiA"),
@@ -2770,23 +2672,66 @@ def get_people_screening_status(people_results):
     ]
 
     for person in people_results:
-        person_name = person.get("Osoba", "")
+
+        person_name = person.get(
+            "Osoba",
+            ""
+        )
 
         for field, label in source_map:
-            value = str(person.get(field, "")).strip().upper()
+
+            value = str(
+                person.get(
+                    field,
+                    ""
+                )
+            ).strip().upper()
 
             if value == "ZNALEZIONO":
-                hits.append(f"{person_name} — {label}")
+
+                hits.append(
+                    f"{person_name} — {label}"
+                )
+
             elif value == "BŁĄD":
-                errors.append(f"{person_name} — {label}")
+
+                errors_by_source.setdefault(
+                    label,
+                    []
+                ).append(
+                    person_name
+                )
+
+    errors = []
+
+    for source, people in errors_by_source.items():
+
+        unique_people = list(
+            dict.fromkeys(people)
+        )
+
+        errors.append(
+            f"{source} — błąd dla "
+            f"{len(unique_people)} "
+            f"osób"
+        )
 
     if hits:
-        return "🔴 SANCTIONS HIT", "; ".join(hits), "; ".join(errors)
+        return (
+            "🔴 SANCTIONS HIT",
+            "; ".join(hits),
+            "; ".join(errors)
+        )
 
     if errors:
-        return "⚠️ DATA ERROR", "", "; ".join(errors)
+        return (
+            "⚠️ DATA ERROR",
+            "",
+            "; ".join(errors)
+        )
 
     return "🟢 CLEAR", "", ""
+
 
 
 def get_final_screening_status(row):
@@ -3187,86 +3132,6 @@ if uploaded_file is not None:
                                 resolver_errors.append(
                                     "Brak klucza API Rejestr.io"
                                 )
-
-                            # -------------------------------------
-                            # SCREENING OSÓB
-                            # -------------------------------------
-                            # Rejestr.io zwrócił jawne osoby. Teraz każdą z nich
-                            # przepuszczamy przez te same listy sankcyjne co spółkę.
-                            if resolved_people:
-                                people_screening = []
-
-                                for person in resolved_people:
-                                    person_result = screen_person_on_sanctions(
-                                        person.get("Osoba", "")
-                                    )
-
-                                    person_result["Funkcja"] = person.get(
-                                        "Funkcja", ""
-                                    )
-                                    person_result["Od"] = person.get(
-                                        "Od", ""
-                                    )
-                                    person_result["Źródło"] = person.get(
-                                        "Źródło", ""
-                                    )
-
-                                    people_screening.append(
-                                        person_result
-                                    )
-
-                                (
-                                    person_status,
-                                    person_hits,
-                                    person_errors
-                                ) = get_people_screening_status(
-                                    people_screening
-                                )
-
-                                result["Screening osób"] = person_status
-                                result["Osoby trafienia"] = person_hits
-
-                                combined_errors = []
-
-                                if person_errors:
-                                    combined_errors.append(
-                                        person_errors
-                                    )
-
-                                if resolver_errors:
-                                    combined_errors.extend(
-                                        resolver_errors
-                                    )
-
-                                result["Osoby błędy"] = "; ".join(
-                                    x for x in combined_errors if x
-                                )
-
-                                result["_people_details"] = people_screening
-                                result["_resolver_details"] = resolver_details
-
-                                # Jeżeli część osób nie została pobrana,
-                                # nie możemy uznać screeningu osób za CLEAR.
-                                if (
-                                    resolver_errors
-                                    and result["Screening osób"]
-                                    != "🔴 SANCTIONS HIT"
-                                ):
-                                    result["Screening osób"] = (
-                                        "⚠️ DATA ERROR"
-                                    )
-
-                            else:
-                                result["Screening osób"] = (
-                                    "⚠️ DATA ERROR"
-                                )
-                                result["Osoby błędy"] = "; ".join(
-                                    resolver_errors
-                                    or [
-                                        "Nie znaleziono osób reprezentujących w Rejestr.io"
-                                    ]
-                                )
-                                result["_resolver_details"] = resolver_details
 
 
                             # -------------------------------------
