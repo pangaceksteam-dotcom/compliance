@@ -2060,6 +2060,8 @@ def get_crbr_company_data(nip):
         "http://www.mf.gov.pl/uslugiBiznesowe/"
         "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/02/01"
     )
+
+    soap_action = ns_service + "/PobierzInformacjeOSpolkachIBeneficjentach"
     ns_schema = (
         "http://www.mf.gov.pl/schematy/AP/"
         "ApiPrzegladoweCRBR/2022/02/01"
@@ -2087,9 +2089,12 @@ def get_crbr_company_data(nip):
             endpoint,
             data=soap_xml.encode("utf-8"),
             headers={
-                "Content-Type": "application/soap+xml; charset=utf-8",
+                "Content-Type": (
+                    'application/soap+xml; charset=utf-8; '
+                    f'action="{soap_action}"'
+                ),
                 "Accept": "application/soap+xml, text/xml, */*",
-                "User-Agent": "Compliance Screening App"
+                "User-Agent": "Mozilla/5.0 (compatible; Compliance-Screening-App/1.0)"
             },
             timeout=30
         )
@@ -2098,13 +2103,38 @@ def get_crbr_company_data(nip):
         return data, data["status"]
 
     if response.status_code != 200:
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR HTTP {response.status_code}"}
-        return data, data["status"]
+        body = response.text.strip()
+        if len(body) > 8000:
+            body = body[:8000] + "\n...[ucięto]"
+        status = f"CRBR HTTP {response.status_code}"
+        data = {
+            "people": [],
+            "ubo": [],
+            "details": [{
+                "HTTP status": response.status_code,
+                "Content-Type": response.headers.get("Content-Type", ""),
+                "Odpowiedź serwera": body
+            }],
+            "status": status
+        }
+        return data, status
 
     try:
         root = ET.fromstring(response.content)
     except ET.ParseError as e:
-        data = {"people": [], "ubo": [], "details": [], "status": f"CRBR — nieprawidłowy XML: {e}"}
+        body = response.text.strip()
+        if len(body) > 8000:
+            body = body[:8000] + "\n...[ucięto]"
+        data = {
+            "people": [],
+            "ubo": [],
+            "details": [{
+                "HTTP status": response.status_code,
+                "Content-Type": response.headers.get("Content-Type", ""),
+                "Odpowiedź serwera": body
+            }],
+            "status": f"CRBR — nieprawidłowy XML: {e}"
+        }
         return data, data["status"]
 
     def local_name(tag):
