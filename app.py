@@ -2036,7 +2036,7 @@ def get_crbr_company_data(nip):
     do reprezentowania spółki.
 
     Oficjalny endpoint:
-      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/12/01
+      https://bramka-crbr.mf.gov.pl:5058/uslugiBiznesowe/uslugiESB/AP/ApiPrzegladoweCRBR/2022/02/01
 
     Wyszukiwanie wykonywane jest po NIP.
     '''
@@ -2053,16 +2053,16 @@ def get_crbr_company_data(nip):
     endpoint = (
         "https://bramka-crbr.mf.gov.pl:5058/"
         "uslugiBiznesowe/uslugiESB/AP/"
-        "ApiPrzegladoweCRBR/2022/12/01"
+        "ApiPrzegladoweCRBR/2022/02/01"
     )
 
     ns_service = (
         "http://www.mf.gov.pl/uslugiBiznesowe/"
-        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/12/01"
+        "uslugiDomenowe/AP/ApiPrzegladoweCRBR/2022/02/01"
     )
     ns_schema = (
         "http://www.mf.gov.pl/schematy/AP/"
-        "ApiPrzegladoweCRBR/2022/12/01"
+        "ApiPrzegladoweCRBR/2022/02/01"
     )
 
     soap_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
