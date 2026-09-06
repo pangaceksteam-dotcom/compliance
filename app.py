@@ -42,6 +42,41 @@ with st.sidebar:
     ).strip()
 
 
+    st.header("👤 Rejestr.io")
+
+    # Klucz można podać przez Streamlit Secrets / zmienną środowiskową
+    # albo jednorazowo w polu poniżej. Nie zapisujemy go w kodzie.
+    try:
+        rejestr_io_secret = str(
+            st.secrets.get("REJESTR_IO_API_KEY", "")
+        ).strip()
+    except Exception:
+        rejestr_io_secret = ""
+
+    rejestr_io_env = os.getenv(
+        "REJESTR_IO_API_KEY",
+        ""
+    ).strip()
+
+    rejestr_io_key_manual = st.text_input(
+        "Klucz API Rejestr.io",
+        value="",
+        type="password",
+        help=(
+            "Klucz API Rejestr.io. "
+            "Najbezpieczniej przechowywać go w Streamlit Secrets "
+            "jako REJESTR_IO_API_KEY. "
+            "Pole ręczne nie jest zapisywane w repozytorium."
+        )
+    ).strip()
+
+    rejestr_io_api_key = (
+        rejestr_io_key_manual
+        or rejestr_io_secret
+        or rejestr_io_env
+    )
+
+
 
 # =========================================================
 # FUNKCJA POMOCNICZA
@@ -2254,11 +2289,16 @@ def extract_name_candidates(text):
 
 def google_search_people(krs, company_name, role, masked_person):
     """
-    Szuka pełnego nazwiska osoby zanonimizowanej przez KRS.
+    Resolver osoby zanonimizowanej przez KRS.
 
-    Nie obchodzi zabezpieczeń Rejestr.io. Korzystamy ze zwykłego
-    publicznego wyniku wyszukiwarki Google. Jeżeli Google blokuje
-    automatyczne zapytanie, zwracamy DATA ERROR zamiast zgadywać.
+    Google bardzo często blokuje automatyczne zapytania HTTP kodem 403.
+    Dlatego używamy dwóch zwykłych, publicznych interfejsów wyszukiwarek:
+      1) DuckDuckGo HTML
+      2) Google jako fallback
+
+    Nie próbujemy obchodzić CAPTCHA ani innych zabezpieczeń.
+    Jeżeli wyszukiwarki nie zwrócą wyników, osoba nie jest automatycznie
+    odanonimizowywana.
     """
 
     krs_clean = re.sub(r"\D", "", str(krs or ""))
@@ -2270,13 +2310,10 @@ def google_search_people(krs, company_name, role, masked_person):
     if not krs_clean or len(masks) < 2:
         return [], "Nie udało się odczytać maski osoby z KRS"
 
-    # Zapytanie celowo mocno ograniczamy do konkretnej spółki/KRS.
     query = (
         f'"{krs_clean}" "{role_text}" '
         f'"{company}" site:rejestr.io'
     )
-
-    url = "https://www.google.com/search"
 
     headers = {
         "User-Agent": (
@@ -2285,132 +2322,334 @@ def google_search_people(krs, company_name, role, masked_person):
             "Chrome/140.0 Safari/537.36"
         ),
         "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,*/*;q=0.8"
+        )
+    }
+
+    search_engines = [
+        (
+            "DuckDuckGo",
+            "https://html.duckduckgo.com/html/",
+            {"q": query}
+        ),
+        (
+            "Google",
+            "https://www.google.com/search",
+            {"q": query, "hl": "pl", "num": "10"}
+        )
+    ]
+
+    errors = []
+
+    for engine_name, url, params in search_engines:
+
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=20
+            )
+        except requests.RequestException as e:
+            errors.append(
+                f"{engine_name} — błąd połączenia: {e}"
+            )
+            continue
+
+        if response.status_code != 200:
+            errors.append(
+                f"{engine_name} HTTP {response.status_code}"
+            )
+            continue
+
+        lower_html = response.text.lower()
+
+        if (
+            "captcha" in lower_html
+            or "unusual traffic" in lower_html
+            or "detected unusual traffic" in lower_html
+            or "automated queries" in lower_html
+        ):
+            errors.append(
+                f"{engine_name} — automatyczne wyszukiwanie zablokowane/CAPTCHA"
+            )
+            continue
+
+        parser = SearchResultParser()
+
+        try:
+            parser.feed(response.text)
+        except Exception as e:
+            errors.append(
+                f"{engine_name} — błąd parsowania: {e}"
+            )
+            continue
+
+        visible_text = " ".join(parser.parts)
+        candidates = extract_name_candidates(visible_text)
+        normalized_text = normalize_text(visible_text)
+
+        scored = []
+
+        for candidate in candidates:
+
+            matched, score = person_mask_matches(
+                masked_person,
+                candidate
+            )
+
+            if not matched:
+                continue
+
+            context_score = 0
+
+            if (
+                krs_clean
+                and krs_clean in normalized_text
+            ):
+                context_score += 20
+
+            if (
+                company
+                and normalize_text(company) in normalized_text
+            ):
+                context_score += 15
+
+            if (
+                role_text
+                and normalize_text(role_text) in normalized_text
+            ):
+                context_score += 15
+
+            total_score = min(
+                100,
+                score + context_score
+            )
+
+            scored.append({
+                "Osoba": candidate,
+                "Confidence": total_score,
+                "Źródło": f"{engine_name} → Rejestr.io",
+                "Zapytanie": query
+            })
+
+        unique = {}
+
+        for item in scored:
+            key = normalize_text(item["Osoba"])
+
+            if (
+                key not in unique
+                or item["Confidence"]
+                > unique[key]["Confidence"]
+            ):
+                unique[key] = item
+
+        results = sorted(
+            unique.values(),
+            key=lambda x: x["Confidence"],
+            reverse=True
+        )
+
+        if results:
+            return results[:5], "OK"
+
+        errors.append(
+            f"{engine_name} — brak kandydata pasującego do maski"
+        )
+
+    return [], " | ".join(errors)
+
+def get_rejestr_io_people(krs, api_key):
+    """
+    Pobiera aktualne osoby powiązane z organizacją z Rejestr.io.
+
+    Korzystamy z:
+      GET /api/v2/org/{krs}/krs-powiazania?aktualnosc=aktualne
+
+    API zwraca aktualne powiązania z KRS oraz dane osoby.
+    Do screeningu osób reprezentujących wybieramy powiązania typu
+    KRS_BOARD. Rejestr.io dokumentuje, że domyślne/aktualne powiązania
+    odpowiadają najnowszemu wpisowi do KRS.
+    """
+
+    if not api_key:
+        return [], "Brak klucza API Rejestr.io"
+
+    krs_clean = re.sub(
+        r"\D",
+        "",
+        str(krs or "")
+    )
+
+    if not krs_clean:
+        return [], "Brak numeru KRS"
+
+    url = (
+        f"https://rejestr.io/api/v2/org/"
+        f"{krs_clean}/krs-powiazania"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": "Compliance Screening App"
     }
 
     try:
         response = requests.get(
             url,
-            params={
-                "q": query,
-                "hl": "pl",
-                "num": "10"
-            },
             headers=headers,
+            params={"aktualnosc": "aktualne"},
             timeout=20
         )
     except requests.RequestException as e:
-        return [], f"Google — błąd połączenia: {e}"
+        return [], f"Rejestr.io — błąd połączenia: {e}"
 
-    if response.status_code != 200:
-        return [], f"Google HTTP {response.status_code}"
-
-    # Google może zwrócić stronę CAPTCHA / blokadę zamiast wyników.
-    lower_html = response.text.lower()
-    if (
-        "unusual traffic" in lower_html
-        or "captcha" in lower_html
-        or "detected unusual traffic" in lower_html
-    ):
-        return [], "Google — automatyczne wyszukiwanie zablokowane/CAPTCHA"
-
-    parser = SearchResultParser()
-
-    try:
-        parser.feed(response.text)
-    except Exception as e:
-        return [], f"Google — błąd parsowania: {e}"
-
-    visible_text = " ".join(parser.parts)
-
-    # Kandydaci z całej strony wyników.
-    candidates = extract_name_candidates(visible_text)
-
-    scored = []
-
-    for candidate in candidates:
-        matched, score = person_mask_matches(
-            masked_person,
-            candidate
+    if response.status_code in (401, 403):
+        return [], (
+            f"Rejestr.io HTTP {response.status_code} — "
+            "sprawdź klucz API i aktywację API"
         )
 
-        if not matched:
+    if response.status_code == 402:
+        return [], (
+            "Rejestr.io HTTP 402 — brak środków / wymagany plan"
+        )
+
+    if response.status_code == 429:
+        return [], (
+            "Rejestr.io HTTP 429 — przekroczony limit zapytań"
+        )
+
+    if response.status_code != 200:
+        return [], (
+            f"Rejestr.io HTTP {response.status_code}"
+        )
+
+    try:
+        data = response.json()
+    except Exception as e:
+        return [], f"Rejestr.io — nieprawidłowy JSON: {e}"
+
+    if not isinstance(data, list):
+        return [], "Rejestr.io — nieoczekiwany format odpowiedzi"
+
+    people = []
+
+    for item in data:
+
+        if not isinstance(item, dict):
             continue
 
-        # Kontekst dodatkowo zwiększa pewność.
-        context_score = 0
-        normalized_text = normalize_text(visible_text)
+        if item.get("typ") != "osoba":
+            continue
 
-        if krs_clean and krs_clean in normalized_text:
-            context_score += 20
+        identity = item.get("tozsamosc") or {}
 
-        if company and normalize_text(company) in normalized_text:
-            context_score += 15
+        if not isinstance(identity, dict):
+            continue
 
-        if role_text and normalize_text(role_text) in normalized_text:
-            context_score += 15
+        full_name = first_value(
+            identity.get("imiona_i_nazwisko"),
+            (
+                f"{first_value(identity.get('imie'))} "
+                f"{first_value(identity.get('nazwisko'))}"
+            ).strip()
+        )
 
-        total_score = min(100, score + context_score)
+        if not full_name:
+            continue
 
-        scored.append({
-            "Osoba": candidate,
-            "Confidence": total_score,
-            "Źródło": "Google → Rejestr.io",
-            "Zapytanie": query
-        })
+        # Powiązanie z konkretną odpytaną organizacją.
+        relations = item.get(
+            "krs_powiazania_kwerendowane",
+            []
+        )
 
-    # Dedup i sortowanie.
+        if not isinstance(relations, list):
+            relations = []
+
+        board_relations = []
+
+        for relation in relations:
+
+            if not isinstance(relation, dict):
+                continue
+
+            relation_type = str(
+                relation.get("typ", "")
+            ).strip().upper()
+
+            description = first_value(
+                relation.get("opis"),
+                relation.get("nazwa"),
+                "CZŁONEK ORGANU"
+            )
+
+            # KRS_BOARD = członek organu reprezentacji.
+            if relation_type == "KRS_BOARD":
+                board_relations.append({
+                    "Funkcja": description,
+                    "Od": first_value(
+                        relation.get("data_start")
+                    ),
+                    "Do": first_value(
+                        relation.get("data_koniec")
+                    )
+                })
+
+        for relation in board_relations:
+
+            # aktualne powiązanie powinno mieć brak daty końcowej.
+            # Jeśli API mimo wszystko zwróci datę końca, pomijamy je.
+            if relation["Do"]:
+                continue
+
+            people.append({
+                "Osoba": full_name,
+                "Funkcja": relation["Funkcja"],
+                "Od": relation["Od"],
+                "Confidence": 100,
+                "Źródło": "Rejestr.io API"
+            })
+
+    # Usuwamy duplikaty osoby + funkcji.
     unique = {}
 
-    for item in scored:
-        key = normalize_text(item["Osoba"])
-        if key not in unique or item["Confidence"] > unique[key]["Confidence"]:
-            unique[key] = item
+    for person in people:
 
-    results = sorted(
-        unique.values(),
-        key=lambda x: x["Confidence"],
-        reverse=True
-    )
+        key = (
+            normalize_text(person["Osoba"]),
+            normalize_text(person["Funkcja"])
+        )
 
-    return results[:5], "OK"
+        if key not in unique:
+            unique[key] = person
+
+    return list(unique.values()), "OK"
 
 
-def resolve_person_from_krs_mask(
-    krs,
-    company_name,
-    masked_person,
-    role
-):
+def resolve_people_from_rejestr_io(krs, api_key):
     """
-    Resolver osoby:
-      KRS maska -> Google -> kandydaci -> zgodność maski -> confidence.
+    Zwraca aktualne osoby z organu reprezentacji.
 
-    Automatycznie wybieramy tylko wynik >= 90.
-    Wynik 70-89 jest potencjalnym dopasowaniem i nie jest automatycznie
-    przekazywany do screeningu sankcyjnego.
+    Nie korzystamy już z Google, DuckDuckGo ani z anonimizowanej maski KRS.
+    Rejestr.io dostarcza jawne imię/nazwisko oraz funkcję.
     """
 
-    candidates, status = google_search_people(
+    people, status = get_rejestr_io_people(
         krs,
-        company_name,
-        role,
-        masked_person
+        api_key
     )
 
-    if not candidates:
-        return None, status, []
+    if not people:
+        return [], status
 
-    best = candidates[0]
+    return people, "OK — Rejestr.io API"
 
-    if best["Confidence"] >= 90:
-        return best, "OK — mocne dopasowanie", candidates
-
-    return None, (
-        "POTENTIAL MATCH — confidence "
-        + str(best["Confidence"])
-        + "%"
-    ), candidates
 
 
 def screen_person_on_sanctions(person_name):
@@ -2898,150 +3137,57 @@ if uploaded_file is not None:
                                 )
 
                             # -------------------------------------
-                            # RESOLVER OSÓB — KRS MASKA -> GOOGLE
+                            # OSOBY — REJESTR.IO API
                             # -------------------------------------
-
-                            krs_rep_people = []
-
-                            if representation_result is not None:
-
-                                krs_rep_people = representation_result.get(
-                                    "Osoby reprezentujące",
-                                    []
-                                )
 
                             resolved_people = []
                             resolver_details = []
                             resolver_errors = []
 
-                            company_for_search = first_value(
-                                result.get("Nazwa KRS", ""),
-                                mf_data.get("name", ""),
-                                nazwa_csv
-                            )
+                            if rejestr_io_api_key:
 
-                            for masked in krs_rep_people:
-
-                                masked_name = (
-                                    first_value(masked.get("Imiona"), "")
-                                    + " "
-                                    + first_value(masked.get("Nazwisko"), "")
-                                ).strip()
-
-                                role = first_value(
-                                    masked.get("Funkcja"),
-                                    ""
-                                )
-
-                                if not masked_name:
-                                    continue
-
-                                resolved, resolve_status, candidates = (
-                                    resolve_person_from_krs_mask(
+                                rejestr_people, rejestr_status = (
+                                    resolve_people_from_rejestr_io(
                                         krs,
-                                        company_for_search,
-                                        masked_name,
-                                        role
+                                        rejestr_io_api_key
                                     )
                                 )
 
-                                detail = {
-                                    "KRS maska": masked_name,
-                                    "Funkcja": role,
-                                    "Resolver": resolve_status,
-                                    "Kandydaci": "; ".join(
-                                        f"{c['Osoba']} ({c['Confidence']}%)"
-                                        for c in candidates
-                                    )
-                                }
+                                if rejestr_people:
 
-                                resolver_details.append(detail)
+                                    for person in rejestr_people:
 
-                                if resolved is not None:
+                                        resolved_people.append(
+                                            person
+                                        )
 
-                                    resolved_person = {
-                                        "Osoba": resolved["Osoba"],
-                                        "Funkcja": role,
-                                        "Od": "",
-                                        "Confidence": resolved["Confidence"],
-                                        "Źródło": resolved["Źródło"]
-                                    }
-
-                                    resolved_people.append(
-                                        resolved_person
-                                    )
+                                        resolver_details.append({
+                                            "KRS maska": "",
+                                            "Funkcja": person.get(
+                                                "Funkcja",
+                                                ""
+                                            ),
+                                            "Resolver": (
+                                                "OK — Rejestr.io API"
+                                            ),
+                                            "Kandydaci": (
+                                                f"{person.get('Osoba', '')} "
+                                                f"(100%)"
+                                            )
+                                        })
 
                                 else:
 
                                     resolver_errors.append(
-                                        f"{masked_name} — {resolve_status}"
+                                        f"Rejestr.io — {rejestr_status}"
                                     )
-
-                            if resolved_people:
-
-                                result["Osoby reprezentujące"] = (
-                                    "; ".join(
-                                        f"{p['Osoba']} — {p['Funkcja']}"
-                                        for p in resolved_people
-                                    )
-                                )
-
-                                people_screening = []
-
-                                for person in resolved_people:
-
-                                    person_result = (
-                                        screen_person_on_sanctions(
-                                            person["Osoba"]
-                                        )
-                                    )
-
-                                    person_result["Funkcja"] = person["Funkcja"]
-                                    person_result["Od"] = person.get("Od", "")
-                                    person_result["Confidence"] = person.get("Confidence", "")
-                                    person_result["Źródło"] = person.get("Źródło", "")
-                                    people_screening.append(person_result)
-
-                                person_status, person_hits, person_errors = (
-                                    get_people_screening_status(
-                                        people_screening
-                                    )
-                                )
-
-                                result["Screening osób"] = person_status
-                                result["Osoby trafienia"] = person_hits
-
-                                combined_errors = list(person_errors.split("; ")) if person_errors else []
-                                combined_errors.extend(resolver_errors)
-                                result["Osoby błędy"] = "; ".join(
-                                    x for x in combined_errors if x
-                                )
-
-                                result["_people_details"] = people_screening
-                                result["_resolver_details"] = resolver_details
-
-                                # Jeżeli mamy niepewne/nieodnalezione osoby,
-                                # nie oznaczamy ich jako CLEAR.
-                                if resolver_errors and result["Screening osób"] != "🔴 SANCTIONS HIT":
-                                    result["Screening osób"] = "⚠️ DATA ERROR"
 
                             else:
 
-                                result["Osoby reprezentujące"] = (
-                                    "; ".join(
-                                        f"{m.get('Imiona','')} {m.get('Nazwisko','')} — {m.get('Funkcja','')}"
-                                        for m in krs_rep_people
-                                    )
-                                    if krs_rep_people
-                                    else "Brak osób w strukturze KRS"
+                                resolver_errors.append(
+                                    "Brak klucza API Rejestr.io"
                                 )
 
-                                result["Screening osób"] = "⚠️ DATA ERROR"
-                                result["Osoby błędy"] = "; ".join(
-                                    resolver_errors
-                                    or ["Nie udało się odanonimizować osób z KRS"]
-                                )
-                                result["_resolver_details"] = resolver_details
 
                             # -------------------------------------
                             # SCREENING MSWiA
@@ -3490,7 +3636,7 @@ if uploaded_file is not None:
                     )
 
             with st.expander(
-                "🧩 Resolver KRS → Google — szczegóły dopasowań"
+                "🧩 Rejestr.io API → osoby — szczegóły"
             ):
 
                 if resolver_debug:
