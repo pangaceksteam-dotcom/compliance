@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 import os
 import re
+from io import BytesIO
 import xml.etree.ElementTree as ET
 from datetime import date
 
@@ -17,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🔎 Sanctions Screening — KRS / PL / EU / USA")
+st.title("🔎 Sanctions Screening — KRS / PL / EU / UK / USA")
 st.write("Wgraj plik CSV z kontrahentami.")
 
 
@@ -1915,6 +1916,185 @@ def check_ofac_sanctions(
 
 
 # =========================================================
+# UK SANCTIONS LIST
+# =========================================================
+
+# Oficjalna lista UK Sanctions List (UKSL), publikowana przez FCDO.
+# Od 28 stycznia 2026 r. jest to jedyne aktualne źródło brytyjskich
+# designations; stara OFSI Consolidated List nie jest już aktualizowana.
+UK_SANCTIONS_CSV_URL = (
+    "https://sanctionslist.fcdo.gov.uk/docs/UK-Sanctions-List.csv"
+)
+
+UK_SANCTIONS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/140.0 Safari/537.36"
+    ),
+    "Accept": "text/csv,text/plain,application/octet-stream,*/*"
+}
+
+
+def parse_uk_csv(content):
+
+    """
+    Parsuje oficjalny UK Sanctions List CSV.
+
+    Nie zakładamy konkretnego układu kolumn do matchingu. Budujemy
+    dodatkowe pole tekstowe z całego rekordu, dzięki czemu możemy
+    sprawdzać nazwę, aliasy, adresy, numery rejestracyjne i pozostałe
+    identyfikatory publikowane przez UK.
+    """
+
+    df = pd.read_csv(
+        BytesIO(content),
+        dtype=str,
+        keep_default_na=False
+    )
+
+    if df.empty:
+
+        raise ValueError(
+            "UK Sanctions List CSV jest pusty"
+        )
+
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    df["_UK row text"] = df.apply(
+        lambda row: " ".join(
+            str(value).strip()
+            for value in row.tolist()
+            if str(value).strip()
+        ),
+        axis=1
+    )
+
+    return df
+
+
+@st.cache_data(ttl=3600)
+def get_uk_sanctions():
+
+    """
+    Pobiera aktualną UK Sanctions List z oficjalnego źródła FCDO.
+    """
+
+    try:
+
+        response = requests.get(
+            UK_SANCTIONS_CSV_URL,
+            timeout=120,
+            headers=UK_SANCTIONS_HEADERS
+        )
+
+    except requests.RequestException as e:
+
+        return None, (
+            f"UK Sanctions List: błąd połączenia — {e}"
+        )
+
+    if response.status_code != 200:
+
+        return None, (
+            "UK Sanctions List: HTTP "
+            f"{response.status_code}"
+        )
+
+    try:
+
+        sanctions = parse_uk_csv(
+            response.content
+        )
+
+        return sanctions, "OK"
+
+    except Exception as e:
+
+        return None, (
+            "UK Sanctions List: błąd parsowania — "
+            f"{e}"
+        )
+
+
+def check_uk_sanctions(
+    name,
+    nip,
+    krs
+):
+
+    sanctions, status = (
+        get_uk_sanctions()
+    )
+
+    if sanctions is None:
+
+        return None, status
+
+    name_norm = normalize_text(
+        name
+    )
+
+    nip_norm = normalize_text(
+        nip
+    )
+
+    krs_norm = normalize_text(
+        krs
+    )
+
+    for _, row in sanctions.iterrows():
+
+        row_text = str(
+            row.get(
+                "_UK row text",
+                ""
+            )
+        )
+
+        row_norm = normalize_text(
+            row_text
+        )
+
+        if nip_norm and nip_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NIP",
+                "wpis": row.to_dict()
+            }, status
+
+        if krs_norm and krs_norm in row_norm:
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "KRS",
+                "wpis": row.to_dict()
+            }, status
+
+        if (
+            name_norm
+            and len(name_norm) >= 5
+            and name_norm in row_norm
+        ):
+
+            return {
+                "status": "ZNALEZIONO",
+                "powod": "NAZWA",
+                "wpis": row.to_dict()
+            }, status
+
+    return {
+        "status": "NIE ZNALEZIONO",
+        "powod": "",
+        "wpis": {}
+    }, status
+
+
+# =========================================================
 # STATUS KOŃCOWY SCREENINGU
 # =========================================================
 
@@ -1924,6 +2104,7 @@ def get_final_screening_status(row):
         "MSWiA sankcje",
         "GIIF sankcje",
         "UE sankcje",
+        "UK sankcje",
         "USA sankcje"
     ]
 
@@ -2377,6 +2558,51 @@ if uploaded_file is not None:
 
                                 result["UE dopasowanie"] = (
                                     eu_result.get(
+                                        "powod",
+                                        ""
+                                    )
+                                )
+
+
+                            # -------------------------------------
+                            # SCREENING UK
+                            # -------------------------------------
+
+                            uk_result, uk_status = (
+                                check_uk_sanctions(
+                                    result.get(
+                                        "Nazwa KRS",
+                                        ""
+                                    ),
+                                    result.get(
+                                        "NIP KRS",
+                                        ""
+                                    ),
+                                    krs
+                                )
+                            )
+
+                            if uk_result is None:
+
+                                result["UK sankcje"] = (
+                                    "BŁĄD"
+                                )
+
+                                result["UK dopasowanie"] = (
+                                    uk_status
+                                )
+
+                            else:
+
+                                result["UK sankcje"] = (
+                                    uk_result.get(
+                                        "status",
+                                        ""
+                                    )
+                                )
+
+                                result["UK dopasowanie"] = (
+                                    uk_result.get(
                                         "powod",
                                         ""
                                     )
