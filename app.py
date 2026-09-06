@@ -2101,11 +2101,11 @@ def check_uk_sanctions(
 
 
 # =========================================================
-# REJESTR.IO - PUBLICZNA STRONA / DANE OSÓB
+# SEARCH RESOLVER - ODANONIMIZOWANIE OSÓB KRS
 # =========================================================
 
-class RejestrTextParser(HTMLParser):
-    """Prosty parser tekstu z HTML, bez BeautifulSoup/lxml."""
+class SearchResultParser(HTMLParser):
+    """Wyciąga widoczny tekst z HTML wyników wyszukiwarki."""
 
     def __init__(self):
         super().__init__()
@@ -2117,231 +2117,300 @@ class RejestrTextParser(HTMLParser):
             self.parts.append(text)
 
 
-def get_rejestr_io_people(krs):
+def split_person_mask(person):
     """
-    Pobiera publiczną stronę Rejestr.io dla KRS i próbuje wyciągnąć
-    aktualne osoby z sekcji 'Zarząd / Organ reprezentacji'.
+    Rozbija zanonimizowaną osobę z KRS na tokeny imienia/nazwiska.
 
-    Nie korzysta z API ani z obchodzenia zabezpieczeń.
-    Jeśli strona nie jest dostępna albo struktura strony się zmieni,
-    zwracany jest błąd zamiast zgadywania danych.
+    Przykłady akceptowane:
+      J**** K******
+      J***N K*****I
+      Jan**** Kowals****
+
+    Zwraca listę tokenów zawierających pierwszą/ostatnią literę
+    oraz długość tokenu.
     """
 
-    krs_clean = re.sub(r"\D", "", str(krs))
+    text = str(person or "").strip()
+    text = re.sub(r"\s+", " ", text)
 
-    if not krs_clean:
-        return None, "Brak KRS"
+    # Bierzemy tylko tokeny zawierające litery; usuwamy typowe dodatki.
+    tokens = re.findall(
+        r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż*-]+",
+        text
+    )
 
-    url = f"https://rejestr.io/krs/{krs_clean}/zarzad"
+    tokens = [
+        token.strip("-")
+        for token in tokens
+        if token.strip("-")
+    ]
+
+    if len(tokens) < 2:
+        return []
+
+    result = []
+
+    for token in tokens[:2]:
+        letters = [c for c in token if c.isalpha()]
+        if not letters:
+            continue
+
+        result.append({
+            "mask": token,
+            "length": len(letters),
+            "first": letters[0],
+            "last": letters[-1] if not set(letters) <= {"*"} else ""
+        })
+
+    return result if len(result) >= 2 else []
+
+
+def person_mask_matches(masked_person, candidate_name):
+    """Sprawdza, czy pełne nazwisko pasuje do maski KRS."""
+
+    masks = split_person_mask(masked_person)
+
+    if len(masks) < 2:
+        return False, 0
+
+    # Kandydat może zawierać drugie imię / nazwisko dwuczłonowe.
+    candidate_tokens = re.findall(
+        r"[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]+",
+        str(candidate_name or "")
+    )
+
+    candidate_tokens = [
+        x for x in candidate_tokens
+        if x and x.lower() not in {
+            "prezes", "zarządu", "zarzad", "członek", "czlonek",
+            "wiceprezes", "wice", "członk", "czlonk"
+        }
+    ]
+
+    if len(candidate_tokens) < 2:
+        return False, 0
+
+    # Sprawdzamy wszystkie sensowne pary imię/nazwisko.
+    best_score = 0
+    best_match = False
+
+    for i in range(len(candidate_tokens) - 1):
+        pair = [candidate_tokens[i], candidate_tokens[i + 1]]
+        score = 0
+        ok = True
+
+        for mask, cand in zip(masks[:2], pair):
+            cand_letters = [c for c in cand if c.isalpha()]
+            if len(cand_letters) != mask["length"]:
+                ok = False
+                break
+
+            if cand_letters[0].casefold() != mask["first"].casefold():
+                ok = False
+                break
+
+            # KRS nie zawsze pokazuje ostatnią literę. Jeżeli ją mamy,
+            # musi się zgadzać.
+            if mask["last"] and (
+                cand_letters[-1].casefold() != mask["last"].casefold()
+            ):
+                ok = False
+                break
+
+            score += 25
+
+        if ok:
+            best_match = True
+            best_score = max(best_score, score + 50)
+
+    return best_match, best_score
+
+
+def extract_name_candidates(text):
+    """Wyciąga potencjalne pary imię+nazwisko z tekstu wyników."""
+
+    # Typowe polskie imię/nazwisko zaczynające się wielką literą.
+    pattern = re.compile(
+        r"\b([A-ZĄĆĘŁŃÓŚŹŻ][A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]{2,})"
+        r"\s+"
+        r"([A-ZĄĆĘŁŃÓŚŹŻ][A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż-]{2,})\b"
+    )
+
+    candidates = []
+    seen = set()
+
+    for match in pattern.finditer(text):
+        candidate = f"{match.group(1)} {match.group(2)}"
+        key = normalize_text(candidate)
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        candidates.append(candidate)
+
+    return candidates
+
+
+def google_search_people(krs, company_name, role, masked_person):
+    """
+    Szuka pełnego nazwiska osoby zanonimizowanej przez KRS.
+
+    Nie obchodzi zabezpieczeń Rejestr.io. Korzystamy ze zwykłego
+    publicznego wyniku wyszukiwarki Google. Jeżeli Google blokuje
+    automatyczne zapytanie, zwracamy DATA ERROR zamiast zgadywać.
+    """
+
+    krs_clean = re.sub(r"\D", "", str(krs or ""))
+    company = str(company_name or "").strip()
+    role_text = str(role or "").strip()
+
+    masks = split_person_mask(masked_person)
+
+    if not krs_clean or len(masks) < 2:
+        return [], "Nie udało się odczytać maski osoby z KRS"
+
+    # Zapytanie celowo mocno ograniczamy do konkretnej spółki/KRS.
+    query = (
+        f'"{krs_clean}" "{role_text}" '
+        f'"{company}" site:rejestr.io'
+    )
+
+    url = "https://www.google.com/search"
 
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/131 Safari/537.36 "
-            "ComplianceScreening/1.0"
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/140.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8"
+        "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
 
     try:
         response = requests.get(
             url,
+            params={
+                "q": query,
+                "hl": "pl",
+                "num": "10"
+            },
             headers=headers,
             timeout=20
         )
-    except Exception as e:
-        return None, f"Rejestr.io błąd połączenia: {e}"
-
-    if response.status_code == 403:
-        return None, "Rejestr.io HTTP 403 — dostęp zabroniony"
-
-    if response.status_code == 429:
-        return None, "Rejestr.io HTTP 429 — zbyt wiele żądań"
+    except requests.RequestException as e:
+        return [], f"Google — błąd połączenia: {e}"
 
     if response.status_code != 200:
-        return None, f"Rejestr.io HTTP {response.status_code}"
+        return [], f"Google HTTP {response.status_code}"
 
-    parser = RejestrTextParser()
+    # Google może zwrócić stronę CAPTCHA / blokadę zamiast wyników.
+    lower_html = response.text.lower()
+    if (
+        "unusual traffic" in lower_html
+        or "captcha" in lower_html
+        or "detected unusual traffic" in lower_html
+    ):
+        return [], "Google — automatyczne wyszukiwanie zablokowane/CAPTCHA"
+
+    parser = SearchResultParser()
 
     try:
         parser.feed(response.text)
-        lines = parser.parts
     except Exception as e:
-        return None, f"Błąd parsowania Rejestr.io: {e}"
+        return [], f"Google — błąd parsowania: {e}"
 
-    # Usuwamy duplikaty zachowując kolejność.
-    clean_lines = []
-    seen = set()
+    visible_text = " ".join(parser.parts)
 
-    for line in lines:
-        key = line.casefold()
-        if key not in seen:
-            clean_lines.append(line)
-            seen.add(key)
+    # Kandydaci z całej strony wyników.
+    candidates = extract_name_candidates(visible_text)
 
-    lines = clean_lines
+    scored = []
 
-    # ---------------------------------------------------------
-    # Szukamy sekcji Zarząd / Organ reprezentacji.
-    # Rejestr.io publikuje tę sekcję jako tekst strony.
-    # ---------------------------------------------------------
-
-    start = None
-
-    for i, line in enumerate(lines):
-        norm = normalize_text(line)
-        if norm in {
-            "ZARZAD ORGAN REPREZENTACJI",
-            "ZARZAD",
-            "ORGAN REPREZENTACJI"
-        }:
-            start = i
-            break
-
-    if start is None:
-        # Fallback: szukamy pierwszej linii zawierającej oba człony.
-        for i, line in enumerate(lines):
-            norm = normalize_text(line)
-            if "ZARZAD" in norm and "ORGAN REPREZENTACJI" in norm:
-                start = i
-                break
-
-    if start is None:
-        return [], "Nie znaleziono sekcji Zarząd / Organ reprezentacji"
-
-    # ---------------------------------------------------------
-    # Koniec sekcji.
-    # ---------------------------------------------------------
-
-    end_markers = {
-        "BRANZE",
-        "SPRAWOZDANIE",
-        "SPRAWOZDANIA",
-        "FAKTY",
-        "BENEFICJENCI RZECZYWIŚCI",
-        "BENEFICJENCI RZECZYWISCI",
-        "WSPOLNICY",
-        "PROKURENCI",
-        "RADA NADZORCZA ORGAN NADZORU",
-        "RADA NADZORCZA"
-    }
-
-    section = []
-
-    for line in lines[start + 1:]:
-        norm = normalize_text(line)
-        if norm in end_markers:
-            break
-        section.append(line.strip())
-
-    # ---------------------------------------------------------
-    # Funkcje, które traktujemy jako role osoby w zarządzie.
-    # ---------------------------------------------------------
-
-    role_patterns = [
-        r"^PREZES(?: ZARZĄDU| ZARZAD)?$",
-        r"^WICEPREZES(?: ZARZĄDU| ZARZAD)?$",
-        r"^WICE PREZES(?: ZARZĄDU| ZARZAD)?$",
-        r"^CZŁONEK(?: ZARZĄDU| ZARZAD)?$",
-        r"^V-CE PREZES(?: ZARZĄDU| ZARZAD)?$",
-        r"^V-CE PREZES$",
-        r"^CZŁONEK RADY ADMINISTRUJĄCEJ$",
-        r"^DYREKTOR(?: ZARZĄDZAJĄCY)?$"
-    ]
-
-    def is_role(text):
-        normalized = normalize_text(text)
-        return any(
-            re.match(pattern, normalized, flags=re.IGNORECASE)
-            for pattern in role_patterns
+    for candidate in candidates:
+        matched, score = person_mask_matches(
+            masked_person,
+            candidate
         )
 
-    def is_date_line(text):
-        return bool(
-            re.search(
-                r"\bOD\s+\d{1,2}\s+[A-ZĄĆĘŁŃÓŚŹŻa-ząćęłńóśźż]+\s+\d{4}",
-                text,
-                flags=re.IGNORECASE
-            )
-        )
-
-    # ---------------------------------------------------------
-    # Parsowanie: osoba -> data -> funkcja.
-    # ---------------------------------------------------------
-
-    people = []
-
-    for idx, line in enumerate(section):
-
-        if not is_role(line):
+        if not matched:
             continue
 
-        role = line.strip()
-        person = ""
-        date_from = ""
+        # Kontekst dodatkowo zwiększa pewność.
+        context_score = 0
+        normalized_text = normalize_text(visible_text)
 
-        # Zwykle układ jest: osoba / Od ... / funkcja.
-        # Szukamy maks. kilku linii wstecz, ale zatrzymujemy się
-        # na oczywistych nagłówkach.
-        for back in range(1, 6):
-            pos = idx - back
-            if pos < 0:
-                break
+        if krs_clean and krs_clean in normalized_text:
+            context_score += 20
 
-            candidate = section[pos].strip()
-            candidate_norm = normalize_text(candidate)
+        if company and normalize_text(company) in normalized_text:
+            context_score += 15
 
-            if candidate_norm in {
-                "SPOSOB REPREZENTACJI",
-                "ZARZAD",
-                "ORGAN REPREZENTACJI"
-            }:
-                break
+        if role_text and normalize_text(role_text) in normalized_text:
+            context_score += 15
 
-            if is_date_line(candidate):
-                date_from = candidate
-                continue
+        total_score = min(100, score + context_score)
 
-            # Pomijamy tekst reprezentacji / komunikaty nawigacyjne.
-            if len(candidate) < 3:
-                continue
+        scored.append({
+            "Osoba": candidate,
+            "Confidence": total_score,
+            "Źródło": "Google → Rejestr.io",
+            "Zapytanie": query
+        })
 
-            if candidate.startswith("Zobacz "):
-                continue
+    # Dedup i sortowanie.
+    unique = {}
 
-            if candidate_norm in end_markers:
-                break
+    for item in scored:
+        key = normalize_text(item["Osoba"])
+        if key not in unique or item["Confidence"] > unique[key]["Confidence"]:
+            unique[key] = item
 
-            # Najbliższa sensowna linia tekstowa przed datą/rolą
-            # traktowana jest jako osoba.
-            person = candidate
-            break
+    results = sorted(
+        unique.values(),
+        key=lambda x: x["Confidence"],
+        reverse=True
+    )
 
-        if person:
-            # Odrzucamy przypadkowe zdania, jeśli parser trafił
-            # w nietypową strukturę HTML.
-            if len(person) <= 120 and not re.search(r"[.!?]$", person):
-                people.append({
-                    "Osoba": person,
-                    "Funkcja": role,
-                    "Od": date_from
-                })
+    return results[:5], "OK"
 
-    # Dedup.
-    unique = []
-    seen_people = set()
 
-    for person in people:
-        key = (
-            normalize_text(person["Osoba"]),
-            normalize_text(person["Funkcja"])
-        )
-        if key not in seen_people:
-            unique.append(person)
-            seen_people.add(key)
+def resolve_person_from_krs_mask(
+    krs,
+    company_name,
+    masked_person,
+    role
+):
+    """
+    Resolver osoby:
+      KRS maska -> Google -> kandydaci -> zgodność maski -> confidence.
 
-    return unique, "OK" if unique else "Nie znaleziono osób w sekcji Zarząd"
+    Automatycznie wybieramy tylko wynik >= 90.
+    Wynik 70-89 jest potencjalnym dopasowaniem i nie jest automatycznie
+    przekazywany do screeningu sankcyjnego.
+    """
+
+    candidates, status = google_search_people(
+        krs,
+        company_name,
+        role,
+        masked_person
+    )
+
+    if not candidates:
+        return None, status, []
+
+    best = candidates[0]
+
+    if best["Confidence"] >= 90:
+        return best, "OK — mocne dopasowanie", candidates
+
+    return None, (
+        "POTENTIAL MATCH — confidence "
+        + str(best["Confidence"])
+        + "%"
+    ), candidates
 
 
 def screen_person_on_sanctions(person_name):
@@ -2829,77 +2898,150 @@ if uploaded_file is not None:
                                 )
 
                             # -------------------------------------
-                            # REJESTR.IO — AKTUALNE OSOBY
+                            # RESOLVER OSÓB — KRS MASKA -> GOOGLE
                             # -------------------------------------
 
-                            rejestr_people, rejestr_status = (
-                                get_rejestr_io_people(
-                                    krs
+                            krs_rep_people = []
+
+                            if representation_result is not None:
+
+                                krs_rep_people = representation_result.get(
+                                    "Osoby reprezentujące",
+                                    []
                                 )
+
+                            resolved_people = []
+                            resolver_details = []
+                            resolver_errors = []
+
+                            company_for_search = first_value(
+                                result.get("Nazwa KRS", ""),
+                                mf_data.get("name", ""),
+                                nazwa_csv
                             )
 
-                            if rejestr_people is None:
+                            for masked in krs_rep_people:
 
-                                result["Osoby reprezentujące"] = (
-                                    "BŁĄD Rejestr.io: "
-                                    + rejestr_status
+                                masked_name = (
+                                    first_value(masked.get("Imiona"), "")
+                                    + " "
+                                    + first_value(masked.get("Nazwisko"), "")
+                                ).strip()
+
+                                role = first_value(
+                                    masked.get("Funkcja"),
+                                    ""
                                 )
 
-                                result["Screening osób"] = (
-                                    "⚠️ DATA ERROR"
+                                if not masked_name:
+                                    continue
+
+                                resolved, resolve_status, candidates = (
+                                    resolve_person_from_krs_mask(
+                                        krs,
+                                        company_for_search,
+                                        masked_name,
+                                        role
+                                    )
                                 )
 
-                                result["Osoby błędy"] = rejestr_status
-
-                            else:
-
-                                if rejestr_people:
-
-                                    result["Osoby reprezentujące"] = (
-                                        "; ".join(
-                                            f"{p['Osoba']} — {p['Funkcja']}"
-                                            for p in rejestr_people
-                                        )
+                                detail = {
+                                    "KRS maska": masked_name,
+                                    "Funkcja": role,
+                                    "Resolver": resolve_status,
+                                    "Kandydaci": "; ".join(
+                                        f"{c['Osoba']} ({c['Confidence']}%)"
+                                        for c in candidates
                                     )
+                                }
 
-                                    people_screening = []
+                                resolver_details.append(detail)
 
-                                    for person in rejestr_people:
+                                if resolved is not None:
 
-                                        person_result = (
-                                            screen_person_on_sanctions(
-                                                person["Osoba"]
-                                            )
-                                        )
+                                    resolved_person = {
+                                        "Osoba": resolved["Osoba"],
+                                        "Funkcja": role,
+                                        "Od": "",
+                                        "Confidence": resolved["Confidence"],
+                                        "Źródło": resolved["Źródło"]
+                                    }
 
-                                        person_result["Funkcja"] = person["Funkcja"]
-                                        person_result["Od"] = person.get("Od", "")
-                                        people_screening.append(person_result)
-
-                                    person_status, person_hits, person_errors = (
-                                        get_people_screening_status(
-                                            people_screening
-                                        )
+                                    resolved_people.append(
+                                        resolved_person
                                     )
-
-                                    result["Screening osób"] = person_status
-                                    result["Osoby trafienia"] = person_hits
-                                    result["Osoby błędy"] = person_errors
-
-                                    # Szczegóły do pokazania poniżej.
-                                    result["_people_details"] = people_screening
 
                                 else:
 
-                                    result["Osoby reprezentujące"] = (
-                                        "Nie znaleziono osób w Rejestr.io"
+                                    resolver_errors.append(
+                                        f"{masked_name} — {resolve_status}"
                                     )
 
-                                    result["Screening osób"] = (
-                                        "⚠️ DATA ERROR"
+                            if resolved_people:
+
+                                result["Osoby reprezentujące"] = (
+                                    "; ".join(
+                                        f"{p['Osoba']} — {p['Funkcja']}"
+                                        for p in resolved_people
+                                    )
+                                )
+
+                                people_screening = []
+
+                                for person in resolved_people:
+
+                                    person_result = (
+                                        screen_person_on_sanctions(
+                                            person["Osoba"]
+                                        )
                                     )
 
-                                    result["Osoby błędy"] = rejestr_status
+                                    person_result["Funkcja"] = person["Funkcja"]
+                                    person_result["Od"] = person.get("Od", "")
+                                    person_result["Confidence"] = person.get("Confidence", "")
+                                    person_result["Źródło"] = person.get("Źródło", "")
+                                    people_screening.append(person_result)
+
+                                person_status, person_hits, person_errors = (
+                                    get_people_screening_status(
+                                        people_screening
+                                    )
+                                )
+
+                                result["Screening osób"] = person_status
+                                result["Osoby trafienia"] = person_hits
+
+                                combined_errors = list(person_errors.split("; ")) if person_errors else []
+                                combined_errors.extend(resolver_errors)
+                                result["Osoby błędy"] = "; ".join(
+                                    x for x in combined_errors if x
+                                )
+
+                                result["_people_details"] = people_screening
+                                result["_resolver_details"] = resolver_details
+
+                                # Jeżeli mamy niepewne/nieodnalezione osoby,
+                                # nie oznaczamy ich jako CLEAR.
+                                if resolver_errors and result["Screening osób"] != "🔴 SANCTIONS HIT":
+                                    result["Screening osób"] = "⚠️ DATA ERROR"
+
+                            else:
+
+                                result["Osoby reprezentujące"] = (
+                                    "; ".join(
+                                        f"{m.get('Imiona','')} {m.get('Nazwisko','')} — {m.get('Funkcja','')}"
+                                        for m in krs_rep_people
+                                    )
+                                    if krs_rep_people
+                                    else "Brak osób w strukturze KRS"
+                                )
+
+                                result["Screening osób"] = "⚠️ DATA ERROR"
+                                result["Osoby błędy"] = "; ".join(
+                                    resolver_errors
+                                    or ["Nie udało się odanonimizować osób z KRS"]
+                                )
+                                result["_resolver_details"] = resolver_details
 
                             # -------------------------------------
                             # SCREENING MSWiA
@@ -3201,10 +3343,14 @@ if uploaded_file is not None:
 
             # Szczegóły screeningu osób trzymamy poza główną tabelą.
             people_debug = {}
+            resolver_debug = {}
             for item in results:
                 if item.get("_people_details"):
                     people_debug[item.get("NIP", "")] = item["_people_details"]
+                if item.get("_resolver_details"):
+                    resolver_debug[item.get("NIP", "")] = item["_resolver_details"]
                 item.pop("_people_details", None)
+                item.pop("_resolver_details", None)
 
             results_df = pd.DataFrame(
                 results
@@ -3340,7 +3486,32 @@ if uploaded_file is not None:
                 else:
 
                     st.write(
-                        "Brak danych osób pobranych z Rejestr.io."
+                        "Brak osób odanonimizowanych automatycznie."
+                    )
+
+            with st.expander(
+                "🧩 Resolver KRS → Google — szczegóły dopasowań"
+            ):
+
+                if resolver_debug:
+
+                    selected_resolver_nip = st.selectbox(
+                        "Wybierz NIP:",
+                        list(resolver_debug.keys()),
+                        key="resolver_debug_nip"
+                    )
+
+                    st.dataframe(
+                        pd.DataFrame(
+                            resolver_debug[selected_resolver_nip]
+                        ),
+                        use_container_width=True
+                    )
+
+                else:
+
+                    st.write(
+                        "Brak danych resolvera."
                     )
 
             # =================================================
