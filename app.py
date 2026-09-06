@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 st.title("🔎 Sanctions Screening — KRS / PL / EU / UK / USA")
-st.write("Wgraj plik CSV z kontrahentami.")
+st.write("Wgraj plik XLSX z NIP-em lub imieniem i nazwiskiem osoby.")
 
 
 # =========================================================
@@ -975,6 +975,7 @@ def _fast_find_in_index(
     nip,
     krs,
     list_name="",
+    dob="",
 ):
     """
     Zwraca (status, powod, wpis) z indeksu.
@@ -1012,10 +1013,24 @@ def _fast_find_in_index(
         if not mask.any():
             continue
 
-        row = index.loc[mask].iloc[0]
+        # Jeżeli podano DOB, preferujemy wpisy zawierające tę datę.
+        # DOB jest opcjonalne — brak DOB nie blokuje dopasowania po nazwisku.
+        candidate_rows = index.loc[mask]
+        dob_norm = normalize_text(dob)
+        row = None
+        if dob_norm:
+            dob_mask = candidate_rows["_screen_norm"].str.contains(
+                re.escape(dob_norm), regex=True, na=False
+            )
+            if dob_mask.any():
+                row = candidate_rows.loc[dob_mask].iloc[0]
+        if row is None:
+            row = candidate_rows.iloc[0]
 
         if list_name:
             reason = f"{reason} ({list_name})"
+        if dob_norm and row is not None and dob_norm in normalize_text(row.get("_screen_text", "")):
+            reason = f"{reason} + DATA URODZENIA"
 
         return (
             "ZNALEZIONO",
@@ -1033,7 +1048,8 @@ def _fast_find_in_index(
 def check_mswiA_sanctions(
     name,
     nip,
-    krs
+    krs,
+    dob=""
 ):
 
     sanctions, status = get_mswiA_screen_index()
@@ -1045,7 +1061,8 @@ def check_mswiA_sanctions(
         sanctions,
         name,
         nip,
-        krs
+        krs,
+        dob=dob
     )
 
     return {
@@ -1296,7 +1313,8 @@ def get_giif_sanctions():
 def check_giif_sanctions(
     name,
     nip,
-    krs
+    krs,
+    dob=""
 ):
 
     sanctions, status = get_giif_screen_index()
@@ -1308,7 +1326,8 @@ def check_giif_sanctions(
         sanctions,
         name,
         nip,
-        krs
+        krs,
+        dob=dob
     )
 
     return {
@@ -1618,7 +1637,8 @@ def check_eu_sanctions(
     name,
     nip,
     krs,
-    token
+    token,
+    dob=""
 ):
 
     sanctions, status = get_eu_screen_index(token)
@@ -1630,7 +1650,8 @@ def check_eu_sanctions(
         sanctions,
         name,
         nip,
-        krs
+        krs,
+        dob=dob
     )
 
     return {
@@ -1834,7 +1855,8 @@ def get_ofac_sanctions():
 def check_ofac_sanctions(
     name,
     nip,
-    krs
+    krs,
+    dob=""
 ):
 
     sanctions, status = get_ofac_screen_index()
@@ -1853,7 +1875,8 @@ def check_ofac_sanctions(
             )
             if False
             else ""
-        )
+        ),
+        dob=dob
     )
 
     # OFAC podaje typ listy w rekordzie. Dodajemy go do powodu
@@ -1981,7 +2004,8 @@ def get_uk_sanctions():
 def check_uk_sanctions(
     name,
     nip,
-    krs
+    krs,
+    dob=""
 ):
 
     sanctions, status = get_uk_screen_index()
@@ -1993,7 +2017,8 @@ def check_uk_sanctions(
         sanctions,
         name,
         nip,
-        krs
+        krs,
+        dob=dob
     )
 
     return {
@@ -2267,14 +2292,15 @@ def resolve_people_from_crbr(nip):
     return data["people"], "OK — CRBR Ministerstwo Finansów", data
 
 
-def screen_ubo_on_sanctions(person_name):
+def screen_ubo_on_sanctions(person_name, date_of_birth=""):
     """
     Screening beneficjenta rzeczywistego na tych samych listach
     co reprezentantów i kontrahenta.
     """
 
     result = screen_person_on_sanctions(
-        person_name
+        person_name,
+        date_of_birth
     )
 
     result["Typ osoby"] = (
@@ -2363,7 +2389,7 @@ def get_ubo_screening_status(ubo_results):
 
 
 
-def screen_person_on_sanctions(person_name):
+def screen_person_on_sanctions(person_name, date_of_birth=""):
     """
     Screening jednej osoby po pełnym imieniu i nazwisku.
 
@@ -2373,6 +2399,7 @@ def screen_person_on_sanctions(person_name):
 
     result = {
         "Osoba": person_name,
+        "Data urodzenia": date_of_birth,
         "MSWiA": "",
         "MSWiA dopasowanie": "",
         "GIIF": "",
@@ -2388,7 +2415,7 @@ def screen_person_on_sanctions(person_name):
     # MSWiA — nazwa osoby, brak NIP/KRS.
     try:
         mswia_result, mswia_status = check_mswiA_sanctions(
-            person_name, "", ""
+            person_name, "", "", date_of_birth
         )
         if mswia_result is None:
             result["MSWiA"] = "BŁĄD"
@@ -2403,7 +2430,7 @@ def screen_person_on_sanctions(person_name):
     # GIIF
     try:
         giif_result, giif_status = check_giif_sanctions(
-            person_name, "", ""
+            person_name, "", "", date_of_birth
         )
         if giif_result is None:
             result["GIIF"] = "BŁĄD"
@@ -2418,7 +2445,7 @@ def screen_person_on_sanctions(person_name):
     # EU
     try:
         eu_result, eu_status = check_eu_sanctions(
-            person_name, "", "", eu_fsf_token
+            person_name, "", "", eu_fsf_token, date_of_birth
         )
         if eu_result is None:
             result["EU"] = "BŁĄD"
@@ -2433,7 +2460,7 @@ def screen_person_on_sanctions(person_name):
     # UK
     try:
         uk_result, uk_status = check_uk_sanctions(
-            person_name, "", ""
+            person_name, "", "", date_of_birth
         )
         if uk_result is None:
             result["UK"] = "BŁĄD"
@@ -2448,7 +2475,7 @@ def screen_person_on_sanctions(person_name):
     # OFAC
     try:
         ofac_result, ofac_status = check_ofac_sanctions(
-            person_name, "", ""
+            person_name, "", "", date_of_birth
         )
         if ofac_result is None:
             result["USA"] = "BŁĄD"
@@ -2703,6 +2730,22 @@ if uploaded_file is not None:
             # NIP jest opcjonalny — brak NIP oznacza rekord osoby.
             df["NIP"] = ""
 
+        dob_column = None
+        for candidate in [
+            "Data urodzenia",
+            "DataUrodzenia",
+            "DOB",
+            "Date of birth"
+        ]:
+            if candidate in df.columns:
+                dob_column = candidate
+                break
+
+        if dob_column is None:
+            df["Data urodzenia"] = ""
+        elif dob_column != "Data urodzenia":
+            df["Data urodzenia"] = df[dob_column]
+
         if name_column is None:
             st.error(
                 "Plik XLSX musi zawierać kolumnę 'Nazwa' "
@@ -2720,7 +2763,8 @@ if uploaded_file is not None:
 
         st.info(
             "Logika: NIP + nazwa = screening spółki; "
-            "brak NIP = screening osoby po imieniu i nazwisku."
+            "brak NIP = screening osoby po imieniu i nazwisku. "
+            "Data urodzenia jest opcjonalna i służy do dokładniejszego dopasowania."
         )
 
         # =================================================
@@ -2793,6 +2837,50 @@ if uploaded_file is not None:
 
                     person_name = nazwa_csv
 
+                    if not person_name:
+                        result = {
+                            "Typ rekordu": "OSOBA",
+                            "NIP": "",
+                            "Nazwa z CSV": "",
+                            "Data urodzenia": "",
+                            "Status MF": "N/D — osoba",
+                            "Status KRS": "N/D — osoba",
+                            "Screening osób": "⚠️ DATA ERROR",
+                            "Osoby błędy": "Brak imienia i nazwiska osoby",
+                            "Spółka publiczna": "N/D — osoba",
+                            "Screening UBO": "N/D — osoba",
+                            "MSWiA sankcje": "BŁĄD",
+                            "MSWiA dopasowanie": "Brak imienia i nazwiska",
+                            "GIIF sankcje": "BŁĄD",
+                            "GIIF dopasowanie": "Brak imienia i nazwiska",
+                            "UE sankcje": "BŁĄD",
+                            "UE dopasowanie": "Brak imienia i nazwiska",
+                            "UK sankcje": "BŁĄD",
+                            "UK dopasowanie": "Brak imienia i nazwiska",
+                            "USA sankcje": "BŁĄD",
+                            "USA dopasowanie": "Brak imienia i nazwiska",
+                        }
+                        final_status, hit_sources, error_sources = get_final_screening_status(result)
+                        result["Status końcowy"] = final_status
+                        result["Źródła z trafieniem"] = hit_sources
+                        result["Źródła z błędem"] = error_sources
+                        results.append(result)
+                        progress.progress((i + 1) / total)
+                        continue
+
+                    date_of_birth = row.get("Data urodzenia", "")
+                    if pd.isna(date_of_birth):
+                        date_of_birth = ""
+                    else:
+                        date_of_birth = str(date_of_birth).strip()
+                        # Excel często zwraca datę jako YYYY-MM-DD lub timestamp.
+                        try:
+                            parsed_dob = pd.to_datetime(date_of_birth, errors="coerce")
+                            if pd.notna(parsed_dob):
+                                date_of_birth = parsed_dob.strftime("%Y-%m-%d")
+                        except Exception:
+                            pass
+
                     status_text.write(
                         f"Sprawdzanie "
                         f"{i + 1} / {total} "
@@ -2800,7 +2888,8 @@ if uploaded_file is not None:
                     )
 
                     person_result = screen_person_on_sanctions(
-                        person_name
+                        person_name,
+                        date_of_birth
                     )
 
                     (
@@ -2815,6 +2904,7 @@ if uploaded_file is not None:
                         "Typ rekordu": "OSOBA",
                         "NIP": "",
                         "Nazwa z CSV": person_name,
+                        "Data urodzenia": date_of_birth,
                         "KRS": "",
                         "Nazwa KRS": "",
                         "Forma prawna": "",
@@ -2886,6 +2976,7 @@ if uploaded_file is not None:
                     "NIP": nip,
 
                     "Nazwa z CSV": nazwa_csv,
+                        "Data urodzenia": "",
 
                     "KRS": "",
 
@@ -3136,7 +3227,8 @@ if uploaded_file is not None:
                                 for person in resolved_people:
 
                                     person_result = screen_person_on_sanctions(
-                                        person.get("Osoba", "")
+                                        person.get("Osoba", ""),
+                                        person.get("Data urodzenia", "")
                                     )
 
                                     person_result["Funkcja"] = person.get(
@@ -3246,7 +3338,8 @@ if uploaded_file is not None:
                                 ubo_details = []
                                 for ubo in ubo_people:
                                     ubo_result = screen_ubo_on_sanctions(
-                                        ubo.get("Osoba", "")
+                                        ubo.get("Osoba", ""),
+                                        ubo.get("Data urodzenia", "")
                                     )
                                     ubo_result["Data urodzenia"] = ubo.get(
                                         "Data urodzenia", ""
