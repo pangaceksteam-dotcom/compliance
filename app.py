@@ -2560,7 +2560,7 @@ PUBLIC_COMPANY_KRS = {
 }
 
 def is_public_company(nip="", krs="", name=""):
-    nip_norm = normalize_nip(nip) if nip else ""
+    nip_norm = re.sub(r"\D", "", str(nip or ""))
     krs_norm = re.sub(r"\D", "", str(krs or ""))
     name_norm = normalize_text(name or "")
 
