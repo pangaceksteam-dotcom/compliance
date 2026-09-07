@@ -19,7 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🔎 Sanctions Screening — KRS / CEIDG / PL / EU / UK / USA")
+st.title("🔎 Sanctions Screening — KRS / CEIDG / GRUPY VAT / PL / EU / UK / USA")
 st.write("Wgraj plik XLSX z NIP-em lub imieniem i nazwiskiem osoby.")
 
 
@@ -277,8 +277,30 @@ def get_company_from_mf(nip):
 
             "regon": first_value(
                 subject.get("regon")
-            )
+            ),
+
+            "statusVat": first_value(subject.get("statusVat")),
+            "nip": first_value(subject.get("nip"), nip),
+            "workingAddress": first_value(subject.get("workingAddress")),
+            "residenceAddress": first_value(subject.get("residenceAddress")),
+            "registrationLegalDate": first_value(
+                subject.get("registrationLegalDate")
+            ),
+            "representatives": subject.get("representatives") or [],
+            "partners": subject.get("partners") or [],
+            "raw_subject": subject,
         }
+
+        # MF nie udostępnia w standardowym publicznym endpointcie White List
+        # pełnej listy członków grupy VAT. Możemy jednak wiarygodnie
+        # rozpoznać NIP grupy po jej nazwie oraz wykorzystać ewentualne
+        # dane reprezentanta zwrócone przez MF. Nie utożsamiamy automatycznie
+        # reprezentanta z podmiotem dominującym.
+        name_norm = normalize_text(result.get("name", ""))
+        result["is_vat_group"] = bool(
+            "GRUPA VAT" in name_norm
+            or re.search(r"(^|\s)GV($|\s)", name_norm)
+        )
 
         return result, "OK"
 
@@ -428,6 +450,51 @@ def get_ceidg_data(nip, api_token):
         "nr lokalu": first_value(address.get("lokal"), ""),
         "kod pocztowy": first_value(address.get("kod"), "")
     }, "OK"
+
+
+# =========================================================
+# GRUPA VAT — DANE IDENTYFIKACYJNE
+# =========================================================
+
+def extract_vat_group_representatives(mf_data):
+    """
+    Wyciąga reprezentantów zwróconych przez White List MF.
+
+    Ważne: przedstawiciel grupy VAT jest członkiem grupy, ale nie musi
+    być podmiotem dominującym. Dlatego funkcja nie oznacza go automatycznie
+    jako dominującego.
+    """
+    people = []
+    for item in (mf_data or {}).get("representatives", []) or []:
+        if not isinstance(item, dict):
+            continue
+        company_name = first_value(
+            item.get("companyName"),
+            item.get("nazwaFirmy"),
+            item.get("name")
+        )
+        person_name = " ".join(
+            str(x).strip()
+            for x in [
+                item.get("firstName"),
+                item.get("lastName")
+            ]
+            if str(x or "").strip()
+        )
+        nip = first_value(item.get("nip"))
+        label = company_name or person_name
+        if label:
+            people.append({"nazwa": label, "nip": nip})
+
+    # deduplikacja
+    out = []
+    seen = set()
+    for item in people:
+        key = (normalize_text(item.get("nazwa", "")), item.get("nip", ""))
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
 
 
 # =========================================================
@@ -3910,6 +3977,15 @@ if uploaded_file is not None:
 
                     "Status MF": "",
 
+                    "Grupa VAT": "",
+                    "NIP Grupy VAT": "",
+                    "Nazwa Grupy VAT": "",
+                    "Przedstawiciel Grupy VAT": "",
+                    "NIP przedstawiciela Grupy VAT": "",
+                    "Członkowie Grupy VAT": "",
+                    "Podmiot dominujący Grupy VAT": "",
+                    "Źródło danych Grupy VAT": "",
+
                     "Status KRS": "",
 
                     "Sposób reprezentacji": "",
@@ -3961,6 +4037,47 @@ if uploaded_file is not None:
                     result["Status MF"] = (
                         mf_status
                     )
+
+                    if mf_data is not None and mf_data.get("is_vat_group"):
+                        result["Grupa VAT"] = "TAK"
+                        result["NIP Grupy VAT"] = first_value(
+                            mf_data.get("nip"), nip
+                        )
+                        result["Nazwa Grupy VAT"] = first_value(
+                            mf_data.get("name")
+                        )
+                        result["Źródło danych Grupy VAT"] = (
+                            "Biała Lista VAT MF"
+                        )
+
+                        representatives = extract_vat_group_representatives(
+                            mf_data
+                        )
+
+                        if representatives:
+                            result["Przedstawiciel Grupy VAT"] = "; ".join(
+                                item.get("nazwa", "")
+                                for item in representatives
+                            )
+                            result["NIP przedstawiciela Grupy VAT"] = "; ".join(
+                                item.get("nip", "")
+                                for item in representatives
+                                if item.get("nip")
+                            )
+
+                        # Publiczne API White List nie zwraca pełnego składu
+                        # grupy VAT ani pola "podmiot dominujący". Nie zgadujemy
+                        # tych danych — pozostawiamy jasny status do dalszej
+                        # weryfikacji.
+                        result["Członkowie Grupy VAT"] = (
+                            "N/D — publiczne API MF nie zwraca składu grupy VAT"
+                        )
+                        result["Podmiot dominujący Grupy VAT"] = (
+                            "N/D — przedstawiciel nie jest automatycznie podmiotem dominującym"
+                        )
+
+                    else:
+                        result["Grupa VAT"] = "NIE"
 
                     if mf_data is None:
 
@@ -4567,6 +4684,19 @@ if uploaded_file is not None:
                         result["Rejestr"] = "CEIDG"
                         result["Screening osób"] = "⚠️ DATA ERROR"
                         result["Osoby błędy"] = f"CEIDG — {e}"
+
+                # Pola Grupy VAT są wspólne dla eksportu.
+                for vat_group_field in [
+                    "Grupa VAT",
+                    "NIP Grupy VAT",
+                    "Nazwa Grupy VAT",
+                    "Przedstawiciel Grupy VAT",
+                    "NIP przedstawiciela Grupy VAT",
+                    "Członkowie Grupy VAT",
+                    "Podmiot dominujący Grupy VAT",
+                    "Źródło danych Grupy VAT",
+                ]:
+                    result.setdefault(vat_group_field, "")
 
                 # Pola CEIDG są wspólne dla eksportu — dla podmiotów KRS
                 # pozostają puste. Dzięki temu raport ma stały układ kolumn.
