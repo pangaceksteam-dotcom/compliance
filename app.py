@@ -70,6 +70,111 @@ def first_value(*values):
 
 
 # =========================================================
+# RAPORT XLSX
+# =========================================================
+
+def build_report_xlsx(results_df, people_debug, ubo_debug, crbr_debug, username):
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment
+    from openpyxl.utils import get_column_letter
+    from datetime import datetime
+
+    output = BytesIO()
+    wb = Workbook()
+
+    ws_summary = wb.active
+    ws_summary.title = "Podsumowanie"
+
+    checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_name = (username or "").strip()
+
+    total = len(results_df)
+    clear_count = int(results_df["Status końcowy"].eq("🟢 CLEAR").sum()) if "Status końcowy" in results_df else 0
+    hit_count = int(results_df["Status końcowy"].eq("🔴 SANCTIONS HIT").sum()) if "Status końcowy" in results_df else 0
+    error_count = int(results_df["Status końcowy"].eq("⚠️ DATA ERROR").sum()) if "Status końcowy" in results_df else 0
+
+    ws_summary.append(["RAPORT SANCTIONS SCREENING"])
+    ws_summary.append([])
+    ws_summary.append(["Data sprawdzenia", checked_at])
+    ws_summary.append(["Nazwa użytkownika", user_name])
+    ws_summary.append([])
+    ws_summary.append(["Liczba rekordów", total])
+    ws_summary.append(["🟢 CLEAR", clear_count])
+    ws_summary.append(["🔴 SANCTIONS HIT", hit_count])
+    ws_summary.append(["⚠️ DATA ERROR", error_count])
+    ws_summary.append([])
+    ws_summary.append(["PODSUMOWANIE WYNIKÓW"])
+
+    for cell in ws_summary[1]:
+        cell.font = Font(bold=True, size=14)
+
+    # Główna tabela wyników
+    ws_results = wb.create_sheet("Screening")
+    for row in results_df.fillna("").astype(str).itertuples(index=False, name=None):
+        ws_results.append(list(row))
+    if len(results_df.columns) > 0:
+        for idx, col in enumerate(results_df.columns, 1):
+            ws_results.cell(1, idx).value = col
+            ws_results.cell(1, idx).font = Font(bold=True)
+            ws_results.cell(1, idx).alignment = Alignment(wrap_text=True, vertical="top")
+
+    def add_details_sheet(title, details_dict):
+        ws = wb.create_sheet(title)
+        rows = []
+        for record_key, details in (details_dict or {}).items():
+            if isinstance(details, list):
+                for d in details:
+                    if isinstance(d, dict):
+                        row = {"NIP / rekord": record_key}
+                        row.update(d)
+                        rows.append(row)
+            elif isinstance(details, dict):
+                # CRBR ma strukturę {details: [...], debug: {...}}
+                detail_rows = details.get("details", [])
+                if isinstance(detail_rows, list):
+                    for d in detail_rows:
+                        if isinstance(d, dict):
+                            row = {"NIP / rekord": record_key}
+                            row.update(d)
+                            rows.append(row)
+
+        if not rows:
+            ws.append(["Brak szczegółowych danych."])
+            return ws
+
+        df = pd.DataFrame(rows).fillna("").astype(str)
+        ws.append(list(df.columns))
+        for row in df.itertuples(index=False, name=None):
+            ws.append(list(row))
+        for cell in ws[1]:
+            cell.font = Font(bold=True)
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        return ws
+
+    add_details_sheet("Osoby", people_debug)
+    add_details_sheet("UBO", ubo_debug)
+    add_details_sheet("CRBR", crbr_debug)
+
+    # Formatowanie wszystkich arkuszy
+    for ws in wb.worksheets:
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions if ws.max_row > 1 else "A1"
+        for col_cells in ws.columns:
+            max_len = 0
+            col_letter = get_column_letter(col_cells[0].column)
+            for cell in col_cells:
+                value = "" if cell.value is None else str(cell.value)
+                max_len = max(max_len, min(len(value), 60))
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.column_dimensions[col_letter].width = max(12, min(max_len + 2, 60))
+
+    wb.save(output)
+    output.seek(0)
+    return output.getvalue()
+
+
+# =========================================================
 # MF API
 # NIP -> KRS / NAZWA / REGON
 # =========================================================
@@ -2670,6 +2775,15 @@ def get_ubo_screening_status(ubo_results):
                     person_name
                 )
 
+            elif value == "NIEZWERYFIKOWANO":
+
+                errors_by_source.setdefault(
+                    label,
+                    []
+                ).append(
+                    person_name
+                )
+
     errors = []
 
     for source, people in errors_by_source.items():
@@ -2679,7 +2793,7 @@ def get_ubo_screening_status(ubo_results):
         )
 
         errors.append(
-            f"{source} — błąd dla "
+            f"{source} — brak możliwości weryfikacji dla "
             f"{len(unique_people)} osób"
         )
 
@@ -2705,8 +2819,13 @@ def screen_person_on_sanctions(person_name, date_of_birth=""):
     """
     Screening jednej osoby po pełnym imieniu i nazwisku.
 
-    Używamy tych samych oficjalnych list, które są już załadowane
-    dla kontrahenta. Nie próbujemy dopasowywać osoby po NIP/KRS.
+    Oficjalny Open API KRS anonimizuje dane osób fizycznych, np.
+    „J** B******* W******”. Takiego nazwiska nie wolno przekazywać
+    do fuzzy matchingu list sankcyjnych, ponieważ może to generować
+    przypadkowe trafienia (np. fałszywy HIT OFAC).
+
+    Jeżeli KRS zwróci nazwisko z gwiazdkami, osoba zostaje oznaczona
+    jako NIEZWERYFIKOWANA, a nie jako trafienie sankcyjne.
     """
 
     result = {
@@ -2723,6 +2842,20 @@ def screen_person_on_sanctions(person_name, date_of_birth=""):
         "USA": "",
         "USA dopasowanie": ""
     }
+
+    # KRS Open API anonimizuje osoby fizyczne.
+    # Nie wykonujemy na takich danych fuzzy matchingu.
+    if "*" in str(person_name or ""):
+        reason = (
+            "NIEZWERYFIKOWANO — KRS anonimizuje dane osoby "
+            "(nazwisko zawiera *)"
+        )
+
+        for field in ["MSWiA", "GIIF", "EU", "UK", "USA"]:
+            result[field] = "NIEZWERYFIKOWANO"
+            result[f"{field} dopasowanie"] = reason
+
+        return result
 
     # MSWiA — nazwa osoby, brak NIP/KRS.
     try:
@@ -2850,6 +2983,15 @@ def get_people_screening_status(people_results):
                     person_name
                 )
 
+            elif value == "NIEZWERYFIKOWANO":
+
+                errors_by_source.setdefault(
+                    label,
+                    []
+                ).append(
+                    person_name
+                )
+
     errors = []
 
     for source, people in errors_by_source.items():
@@ -2859,9 +3001,8 @@ def get_people_screening_status(people_results):
         )
 
         errors.append(
-            f"{source} — błąd dla "
-            f"{len(unique_people)} "
-            f"osób"
+            f"{source} — brak możliwości weryfikacji dla "
+            f"{len(unique_people)} osób"
         )
 
     if hits:
@@ -4080,6 +4221,36 @@ if uploaded_file is not None:
                 use_container_width=True,
                 height=600
             )
+
+            # =================================================
+            # RAPORT
+            # =================================================
+
+            report_col1, report_col2 = st.columns([3, 1])
+
+            with report_col1:
+                report_username = st.text_input(
+                    "Nazwa użytkownika",
+                    placeholder="np. Jan Kowalski",
+                    key="report_username"
+                )
+
+            with report_col2:
+                report_data = build_report_xlsx(
+                    results_df,
+                    people_debug,
+                    ubo_debug,
+                    crbr_debug,
+                    report_username
+                )
+
+                st.download_button(
+                    "📥 Pobierz raport",
+                    data=report_data,
+                    file_name=f"raport_sanctions_{date.today().isoformat()}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
 
             # =================================================
             # STATYSTYKI
