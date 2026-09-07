@@ -1467,94 +1467,26 @@ def check_mswiA_sanctions(
     if sanctions is None:
         return None, status
 
-def _uk_find_column(df, *names):
-    """Znajduje kolumnę UKSL niezależnie od wielkości liter/spacji."""
-    normalized = {
-        re.sub(r"\s+", " ", str(c).strip()).casefold(): c
-        for c in df.columns
-    }
-    for name in names:
-        key = re.sub(r"\s+", " ", str(name).strip()).casefold()
-        if key in normalized:
-            return normalized[key]
-    return None
-
-
-def parse_uk_csv(content):
-    """
-    Parsuje aktualny UK Sanctions List CSV.
-
-    UKSL ma osobne pola Name 1..Name 6 oraz DOB. Nie spłaszczamy
-    tych pól do jednego tekstu dla matchingu osób. Zachowujemy je
-    osobno, ponieważ np. Melnichenko występuje jako:
-    Name 6 = MELNICHENKO, Name 1 = ANDREY, Name 2 = IGOREVICH.
-    """
-    last_error = None
-    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
-        try:
-            df = pd.read_csv(
-                BytesIO(content),
-                dtype=str,
-                keep_default_na=False,
-                encoding=encoding,
-            )
-            break
-        except Exception as e:
-            last_error = e
+    # Dla osoby fizycznej nie mamy NIP/KRS — używamy dedykowanego
+    # matchera osoby, uwzględniającego imię, nazwisko i opcjonalnie DOB.
+    if not str(nip or "").strip() and not str(krs or "").strip():
+        matched_status, reason, wpis = _person_match_in_index(
+            sanctions, name, dob
+        )
     else:
-        raise ValueError(f"UK Sanctions List CSV: nie można odczytać — {last_error}")
-
-    if df.empty:
-        raise ValueError("UK Sanctions List CSV jest pusty")
-
-    df.columns = [str(column).strip() for column in df.columns]
-
-    # Normalny indeks tekstowy nadal jest potrzebny dla spółek.
-    df["_UK row text"] = df.apply(
-        lambda row: " ".join(
-            str(value).strip()
-            for value in row.tolist()
-            if str(value).strip()
-        ),
-        axis=1,
-    )
-
-    # Jawne pola osoby — UKSL format guide definiuje Name 1..Name 6 i DOB.
-    name_cols = []
-    for i in range(1, 7):
-        col = _uk_find_column(df, f"Name {i}")
-        if col:
-            name_cols.append(col)
-
-    df["_UK person name text"] = df.apply(
-        lambda row: " ".join(
-            str(row.get(col, "")).strip()
-            for col in name_cols
-            if str(row.get(col, "")).strip()
-        ),
-        axis=1,
-    )
-
-    dob_col = _uk_find_column(df, "DOB", "Date of Birth", "Date Of Birth")
-    if dob_col:
-        df["_UK DOB"] = df[dob_col].astype(str).str.strip()
-    else:
-        df["_UK DOB"] = ""
-
-    group_col = _uk_find_column(df, "Group ID", "Group Id", "GroupID")
-    if group_col:
-        df["_UK Group ID"] = df[group_col].astype(str).str.strip()
-    else:
-        df["_UK Group ID"] = ""
-
-    return df
+        matched_status, reason, wpis = _fast_find_in_index(
+            sanctions,
+            name,
+            nip,
+            krs,
+            dob=dob
+        )
 
     return {
         "status": matched_status,
         "powod": reason,
         "wpis": wpis
     }, status
-
 
 
 # =========================================================
