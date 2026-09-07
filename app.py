@@ -19,7 +19,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🔎 Sanctions Screening — KRS / PL / EU / UK / USA")
+st.title("🔎 Sanctions Screening — KRS / CEIDG / PL / EU / UK / USA")
 st.write("Wgraj plik XLSX z NIP-em lub imieniem i nazwiskiem osoby.")
 
 
@@ -40,6 +40,37 @@ with st.sidebar:
             "Jeżeli oba są ustawione, użyty zostanie token wpisany tutaj."
         )
     ).strip()
+
+    st.header("🇵🇱 CEIDG")
+
+    try:
+        ceidg_secret = str(
+            st.secrets.get("CEIDG_API_TOKEN", "")
+        ).strip()
+    except Exception:
+        ceidg_secret = ""
+
+    ceidg_env = os.getenv(
+        "CEIDG_API_TOKEN",
+        ""
+    ).strip()
+
+    ceidg_token_manual = st.text_input(
+        "Token API CEIDG (opcjonalnie)",
+        value="",
+        type="password",
+        help=(
+            "Oficjalne API CEIDG v3. Najbezpieczniej przechowywać token "
+            "w Streamlit Secrets jako CEIDG_API_TOKEN. Token jest potrzebny "
+            "do weryfikacji podmiotów, które nie mają KRS."
+        )
+    ).strip()
+
+    ceidg_api_token = (
+        ceidg_token_manual
+        or ceidg_secret
+        or ceidg_env
+    )
 
     st.header("🧾 Rejestr.io")
 
@@ -103,7 +134,7 @@ def first_value(*values):
 # RAPORT XLSX
 # =========================================================
 
-def build_report_xlsx(results_df, people_debug, ubo_debug, crbr_debug, username):
+def build_report_xlsx(results_df, people_debug, ubo_debug, crbr_debug, username, ceidg_debug=None):
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment
@@ -185,6 +216,7 @@ def build_report_xlsx(results_df, people_debug, ubo_debug, crbr_debug, username)
     add_details_sheet("Osoby", people_debug)
     add_details_sheet("UBO", ubo_debug)
     add_details_sheet("CRBR", crbr_debug)
+    add_details_sheet("CEIDG", ceidg_debug or {})
 
     # Formatowanie wszystkich arkuszy
     for ws in wb.worksheets:
@@ -253,6 +285,149 @@ def get_company_from_mf(nip):
     except Exception as e:
 
         return None, f"Błąd MF: {e}"
+
+
+# =========================================================
+# CEIDG API
+# PODMIOTY NIEUJĘTE W KRS (JDG / CEIDG)
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def get_ceidg_data(nip, api_token):
+    """
+    Pobiera dane przedsiębiorcy z oficjalnego API CEIDG v3.
+
+    CEIDG API wymaga tokenu JWT. Wyszukiwanie po NIP pozwala obsłużyć
+    przedsiębiorców, dla których MF nie zwróciło numeru KRS.
+    """
+
+    nip_clean = re.sub(r"\D", "", str(nip or ""))
+
+    if not nip_clean:
+        return None, "CEIDG — brak NIP"
+
+    if not api_token:
+        return None, "CEIDG — BRAK TOKENU API"
+
+    url = "https://dane.biznes.gov.pl/api/ceidg/v3/firmy"
+
+    try:
+        response = requests.get(
+            url,
+            params={"nip": nip_clean},
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Accept": "application/json",
+                "User-Agent": "Compliance Screening App"
+            },
+            timeout=60
+        )
+    except requests.RequestException as e:
+        return None, f"CEIDG — błąd połączenia: {e}"
+
+    if response.status_code == 401:
+        return None, "CEIDG — HTTP 401 (nieprawidłowy lub wygasły token)"
+
+    if response.status_code == 403:
+        return None, "CEIDG — HTTP 403 (brak uprawnień)"
+
+    if response.status_code == 429:
+        return None, "CEIDG — HTTP 429 (limit zapytań)"
+
+    if response.status_code != 200:
+        return None, f"CEIDG — HTTP {response.status_code}"
+
+    try:
+        data = response.json()
+    except Exception as e:
+        return None, f"CEIDG — nieprawidłowy JSON: {e}"
+
+    firmy = data.get("firmy", []) if isinstance(data, dict) else []
+
+    if not isinstance(firmy, list) or not firmy:
+        return None, "CEIDG — nie znaleziono wpisu dla NIP"
+
+    # W normalnej sytuacji po NIP otrzymujemy jeden wpis. Jeżeli API zwróci
+    # więcej, preferujemy aktywny, a następnie pierwszy rekord.
+    def ceidg_status(item):
+        return str(item.get("status", "")).strip().upper()
+
+    firmy_sorted = sorted(
+        firmy,
+        key=lambda item: 0 if ceidg_status(item) == "AKTYWNY" else 1
+    )
+
+    company = firmy_sorted[0]
+    owner = company.get("wlasciciel") or company.get("właściciel") or {}
+    address = company.get("adresDzialalnosci") or {}
+
+    owner_name = " ".join(
+        str(value).strip()
+        for value in [
+            owner.get("imie", ""),
+            owner.get("imiona", ""),
+            owner.get("nazwisko", "")
+        ]
+        if str(value).strip()
+    )
+
+    # Jeżeli API zwróciło zarówno imiona, jak i imię, unikamy duplikacji.
+    if owner.get("imiona") and owner.get("imie"):
+        owner_name = " ".join(
+            str(value).strip()
+            for value in [
+                owner.get("imiona", ""),
+                owner.get("nazwisko", "")
+            ]
+            if str(value).strip()
+        )
+
+    return {
+        "firma": company,
+        "właściciel": owner,
+        "właściciel imię i nazwisko": owner_name,
+        "adres": address,
+        "status": ceidg_status(company),
+        "nazwa": first_value(
+            company.get("nazwa"),
+            company.get("firma"),
+            ""
+        ),
+        "nip": first_value(
+            owner.get("nip"),
+            company.get("nip"),
+            nip_clean
+        ),
+        "regon": first_value(
+            owner.get("regon"),
+            company.get("regon"),
+            ""
+        ),
+        "data rozpoczęcia": first_value(
+            company.get("dataRozpoczecia"),
+            ""
+        ),
+        "data zawieszenia": first_value(
+            company.get("dataZawieszenia"),
+            ""
+        ),
+        "data zakończenia": first_value(
+            company.get("dataZakonczenia"),
+            ""
+        ),
+        "data wykreślenia": first_value(
+            company.get("dataWykreslenia"),
+            ""
+        ),
+        "województwo": first_value(address.get("wojewodztwo"), ""),
+        "powiat": first_value(address.get("powiat"), ""),
+        "gmina": first_value(address.get("gmina"), ""),
+        "miejscowość": first_value(address.get("miasto"), ""),
+        "ulica": first_value(address.get("ulica"), ""),
+        "nr domu": first_value(address.get("budynek"), ""),
+        "nr lokalu": first_value(address.get("lokal"), ""),
+        "kod pocztowy": first_value(address.get("kod"), "")
+    }, "OK"
 
 
 # =========================================================
@@ -3291,6 +3466,12 @@ def get_final_screening_status(row):
         if person_errors:
             errors.append("OSOBY: " + person_errors)
 
+    ceidg_status = str(row.get("Status CEIDG", "")).strip().upper()
+    if ceidg_status.startswith("BŁĄD") or ceidg_status.startswith("CEIDG — BRAK TOKENU"):
+        ceidg_error = str(row.get("Status CEIDG", "")).strip()
+        if ceidg_error:
+            errors.append(ceidg_error)
+
     # Screening beneficjentów rzeczywistych ma taki sam priorytet,
     # z wyjątkiem spółki publicznej: brak CRBR jest wtedy oczekiwany.
     ubo_status = str(
@@ -4255,6 +4436,154 @@ if uploaded_file is not None:
                             f"BŁĄD dalszego przetwarzania: {e}"
                         )
 
+                # =================================================
+                # CEIDG — FALLBACK DLA PODMIOTÓW BEZ KRS
+                # =================================================
+
+                if not str(result.get("KRS", "") or "").strip():
+
+                    try:
+                        ceidg_data, ceidg_status = get_ceidg_data(
+                            nip,
+                            ceidg_api_token
+                        )
+
+                        result["Status CEIDG"] = ceidg_status
+                        result["Rejestr"] = "CEIDG"
+
+                        if ceidg_data is None:
+                            # Brak tokenu / brak wpisu / błąd API musi być
+                            # widoczny jako DATA ERROR dla podmiotu bez KRS.
+                            result["Screening osób"] = "⚠️ DATA ERROR"
+                            result["Osoby błędy"] = ceidg_status
+
+                        else:
+                            result["Status CEIDG"] = "ZNALEZIONO"
+                            result["Rejestr"] = "CEIDG"
+                            result["Nazwa CEIDG"] = ceidg_data.get("nazwa", "")
+                            result["REGON"] = ceidg_data.get("regon", "")
+                            result["Status działalności"] = ceidg_data.get("status", "")
+                            result["Data rozpoczęcia działalności"] = ceidg_data.get(
+                                "data rozpoczęcia", ""
+                            )
+                            result["Data zawieszenia"] = ceidg_data.get(
+                                "data zawieszenia", ""
+                            )
+                            result["Data zakończenia działalności"] = ceidg_data.get(
+                                "data zakończenia", ""
+                            )
+                            result["Data wykreślenia z CEIDG"] = ceidg_data.get(
+                                "data wykreślenia", ""
+                            )
+
+                            result["Województwo"] = ceidg_data.get("województwo", "")
+                            result["Powiat"] = ceidg_data.get("powiat", "")
+                            result["Gmina"] = ceidg_data.get("gmina", "")
+                            result["Miejscowość"] = ceidg_data.get("miejscowość", "")
+                            result["Ulica"] = ceidg_data.get("ulica", "")
+                            result["Nr domu"] = ceidg_data.get("nr domu", "")
+                            result["Nr lokalu"] = ceidg_data.get("nr lokalu", "")
+                            result["Kod pocztowy"] = ceidg_data.get("kod pocztowy", "")
+
+                            owner_name = ceidg_data.get(
+                                "właściciel imię i nazwisko",
+                                ""
+                            ).strip()
+
+                            owner = ceidg_data.get("właściciel", {}) or {}
+                            owner_dob = first_value(
+                                owner.get("dataUrodzenia"),
+                                owner.get("data_urodzenia"),
+                                ""
+                            )
+
+                            if owner_name:
+                                owner_result = screen_person_on_sanctions(
+                                    owner_name,
+                                    owner_dob
+                                )
+
+                                owner_status, owner_hits, owner_errors = (
+                                    get_people_screening_status(
+                                        [owner_result]
+                                    )
+                                )
+
+                                result["Właściciel / przedsiębiorca"] = owner_name
+                                result["Osoby reprezentujące"] = owner_name + " — PRZEDSIĘBIORCA"
+                                result["Screening osób"] = owner_status
+                                result["Osoby trafienia"] = owner_hits
+                                result["Osoby błędy"] = owner_errors
+                                result["Beneficjenci rzeczywiści"] = owner_name
+                                result["Screening UBO"] = "N/D — przedsiębiorca CEIDG"
+                                result["UBO błędy"] = ""
+                                result["_people_details"] = [owner_result]
+
+                                result["MSWiA sankcje"] = owner_result.get("MSWiA", "")
+                                result["MSWiA dopasowanie"] = owner_result.get(
+                                    "MSWiA dopasowanie", ""
+                                )
+                                result["GIIF sankcje"] = owner_result.get("GIIF", "")
+                                result["GIIF dopasowanie"] = owner_result.get(
+                                    "GIIF dopasowanie", ""
+                                )
+                                result["UE sankcje"] = owner_result.get("UE", "")
+                                result["UE dopasowanie"] = owner_result.get(
+                                    "UE dopasowanie", ""
+                                )
+                                result["UK sankcje"] = owner_result.get("UK", "")
+                                result["UK dopasowanie"] = owner_result.get(
+                                    "UK dopasowanie", ""
+                                )
+                                result["USA sankcje"] = owner_result.get("USA", "")
+                                result["USA dopasowanie"] = owner_result.get(
+                                    "USA dopasowanie", ""
+                                )
+
+                            else:
+                                result["Screening osób"] = "⚠️ DATA ERROR"
+                                result["Osoby błędy"] = (
+                                    "CEIDG — znaleziono firmę, ale brak danych właściciela"
+                                )
+
+                            result["_ceidg_details"] = {
+                                "NIP / rekord": nip,
+                                "Nazwa CEIDG": ceidg_data.get("nazwa", ""),
+                                "Właściciel": owner_name,
+                                "Status działalności": ceidg_data.get("status", ""),
+                                "Data rozpoczęcia": ceidg_data.get("data rozpoczęcia", ""),
+                                "REGON": ceidg_data.get("regon", ""),
+                                "Adres": " ".join(
+                                    x for x in [
+                                        ceidg_data.get("ulica", ""),
+                                        ceidg_data.get("nr domu", ""),
+                                        ceidg_data.get("nr lokalu", "")
+                                    ] if x
+                                )
+                            }
+
+                    except Exception as e:
+                        result["Status CEIDG"] = f"BŁĄD: {e}"
+                        result["Rejestr"] = "CEIDG"
+                        result["Screening osób"] = "⚠️ DATA ERROR"
+                        result["Osoby błędy"] = f"CEIDG — {e}"
+
+                # Pola CEIDG są wspólne dla eksportu — dla podmiotów KRS
+                # pozostają puste. Dzięki temu raport ma stały układ kolumn.
+                for ceidg_field in [
+                    "Rejestr",
+                    "Status CEIDG",
+                    "Nazwa CEIDG",
+                    "Właściciel / przedsiębiorca",
+                    "Status działalności",
+                    "Data rozpoczęcia działalności",
+                    "Data zawieszenia",
+                    "Data zakończenia działalności",
+                    "Data wykreślenia z CEIDG",
+                    "_ceidg_details"
+                ]:
+                    result.setdefault(ceidg_field, "")
+
                 # -----------------------------------------
                 # STATUS KOŃCOWY
                 # -----------------------------------------
@@ -4300,6 +4629,7 @@ if uploaded_file is not None:
             resolver_debug = {}
             ubo_debug = {}
             crbr_debug = {}
+            ceidg_debug = {}
             for item in results:
                 if item.get("_people_details"):
                     people_debug[item.get("NIP", "")] = item["_people_details"]
@@ -4309,6 +4639,8 @@ if uploaded_file is not None:
                     ubo_debug[item.get("NIP", "")] = item["_ubo_details"]
                 if item.get("_crbr_details"):
                     crbr_debug[item.get("NIP", "")] = item["_crbr_details"]
+                if item.get("_ceidg_details"):
+                    ceidg_debug[item.get("NIP", "")] = [item["_ceidg_details"]]
                 item.pop("_people_details", None)
                 item.pop("_resolver_details", None)
                 item.pop("_ubo_details", None)
@@ -4351,7 +4683,8 @@ if uploaded_file is not None:
                     people_debug,
                     ubo_debug,
                     crbr_debug,
-                    report_username
+                    report_username,
+                    ceidg_debug
                 )
 
                 st.download_button(
