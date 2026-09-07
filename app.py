@@ -41,6 +41,36 @@ with st.sidebar:
         )
     ).strip()
 
+    st.header("🧾 Rejestr.io")
+
+    try:
+        rejestr_io_secret = str(
+            st.secrets.get("REJESTR_IO_API_KEY", "")
+        ).strip()
+    except Exception:
+        rejestr_io_secret = ""
+
+    rejestr_io_env = os.getenv(
+        "REJESTR_IO_API_KEY",
+        ""
+    ).strip()
+
+    rejestr_io_key_manual = st.text_input(
+        "Klucz API Rejestr.io",
+        value="",
+        type="password",
+        help=(
+            "Klucz API Rejestr.io. Najbezpieczniej przechowywać go "
+            "w Streamlit Secrets jako REJESTR_IO_API_KEY."
+        )
+    ).strip()
+
+    rejestr_io_api_key = (
+        rejestr_io_key_manual
+        or rejestr_io_secret
+        or rejestr_io_env
+    )
+
 
     st.header("🇵🇱 CRBR")
 
@@ -516,6 +546,181 @@ def get_krs_data(krs):
     except Exception as e:
 
         return None, None, f"Błąd parsowania KRS: {e}"
+
+# =========================================================
+# REJESTR.IO - REPREZENTACJA
+# =========================================================
+
+@st.cache_data(ttl=3600)
+def get_rejestr_io_people(krs, api_key):
+    """
+    Pobiera aktualne osoby z organu reprezentacji z Rejestr.io.
+
+    Endpoint:
+      GET /api/v2/org/{krs}/krs-powiazania?aktualnosc=aktualne
+
+    KRS_BOARD oznacza członka organu reprezentacji.
+    """
+    if not api_key:
+        return [], "Brak klucza API Rejestr.io"
+
+    krs_clean = re.sub(
+        r"\D",
+        "",
+        str(krs or "")
+    )
+
+    if not krs_clean:
+        return [], "Brak numeru KRS"
+
+    url = (
+        f"https://rejestr.io/api/v2/org/"
+        f"{krs_clean}/krs-powiazania"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Accept": "application/json",
+        "User-Agent": "Compliance Screening App"
+    }
+
+    try:
+        response = requests.get(
+            url,
+            headers=headers,
+            params={"aktualnosc": "aktualne"},
+            timeout=20
+        )
+    except requests.RequestException as e:
+        return [], f"Rejestr.io — błąd połączenia: {e}"
+
+    if response.status_code in (401, 403):
+        return [], (
+            f"Rejestr.io HTTP {response.status_code} — "
+            "sprawdź klucz API i aktywację API"
+        )
+
+    if response.status_code == 402:
+        return [], (
+            "Rejestr.io HTTP 402 — brak środków / wymagany plan"
+        )
+
+    if response.status_code == 429:
+        return [], (
+            "Rejestr.io HTTP 429 — przekroczony limit zapytań"
+        )
+
+    if response.status_code != 200:
+        return [], f"Rejestr.io HTTP {response.status_code}"
+
+    try:
+        data = response.json()
+    except Exception as e:
+        return [], f"Rejestr.io — nieprawidłowy JSON: {e}"
+
+    if not isinstance(data, list):
+        return [], "Rejestr.io — nieoczekiwany format odpowiedzi"
+
+    people = []
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        if item.get("typ") != "osoba":
+            continue
+
+        identity = item.get("tozsamosc") or {}
+        if not isinstance(identity, dict):
+            continue
+
+        full_name = first_value(
+            identity.get("imiona_i_nazwisko"),
+            (
+                f"{first_value(identity.get('imie'))} "
+                f"{first_value(identity.get('nazwisko'))}"
+            ).strip()
+        )
+
+        if not full_name:
+            continue
+
+        relations = item.get(
+            "krs_powiazania_kwerendowane",
+            []
+        )
+
+        if not isinstance(relations, list):
+            relations = []
+
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+
+            relation_type = str(
+                relation.get("typ", "")
+            ).strip().upper()
+
+            if relation_type != "KRS_BOARD":
+                continue
+
+            data_koniec = first_value(
+                relation.get("data_koniec")
+            )
+
+            # Interesują nas wyłącznie aktualne osoby.
+            if data_koniec:
+                continue
+
+            function = first_value(
+                relation.get("opis"),
+                relation.get("nazwa"),
+                "CZŁONEK ORGANU"
+            )
+
+            people.append({
+                "Osoba": full_name,
+                "Funkcja": function,
+                "Od": first_value(
+                    relation.get("data_start")
+                ),
+                "Do": data_koniec,
+                "Data urodzenia": first_value(
+                    identity.get("data_urodzenia")
+                ),
+                "Confidence": 100,
+                "Źródło": "Rejestr.io API"
+            })
+
+    # Usuwamy duplikaty osoba + funkcja.
+    unique = {}
+
+    for person in people:
+        key = (
+            normalize_text(person["Osoba"]),
+            normalize_text(person["Funkcja"])
+        )
+
+        if key not in unique:
+            unique[key] = person
+
+    if not unique:
+        return [], "Rejestr.io — nie znaleziono aktualnego zarządu"
+
+    return list(unique.values()), "OK"
+
+
+def resolve_people_from_rejestr_io(krs, api_key):
+    people, status = get_rejestr_io_people(
+        krs,
+        api_key
+    )
+
+    if not people:
+        return [], status
+
+    return people, "OK — Rejestr.io API"
+
 
 # =========================================================
 # KRS - REPREZENTACJA / DZIAŁ 2
@@ -3617,18 +3822,30 @@ if uploaded_file is not None:
                             if raw_json is not None:
                                 debug_data[nip] = raw_json
 
+                            # =========================================
+                            # REPREZENTACJA — REJESTR.IO
+                            # =========================================
+                            #
+                            # Dane osób reprezentujących pobieramy z
+                            # Rejestr.io, a nie z anonimizowanego Open API KRS.
+                            # Dzięki temu dostajemy jawne imiona/nazwiska.
+                            #
+
+                            resolved_people = []
+                            resolver_details = []
+                            resolver_errors = []
+
+                            # Sposób reprezentacji nadal bierzemy z oficjalnego
+                            # KRS — endpoint Rejestr.io /krs-powiazania zwraca
+                            # członków organu, ale nie zwraca tekstu sposobu
+                            # reprezentacji.
                             representation_result, representation_status = (
                                 get_krs_representation(
                                     krs
                                 )
                             )
 
-                            result["Status KRS"] = (
-                                krs_status
-                            )
-
                             if representation_result is not None:
-
                                 result["Sposób reprezentacji"] = (
                                     representation_result.get(
                                         "Sposób reprezentacji",
@@ -3636,87 +3853,43 @@ if uploaded_file is not None:
                                     )
                                 )
 
-                                osoby = representation_result.get(
-                                    "Osoby reprezentujące",
-                                    []
+                            if not rejestr_io_api_key:
+                                resolver_errors.append(
+                                    "Rejestr.io — brak klucza API"
                                 )
-
-                                result["Osoby reprezentujące"] = (
-                                    "; ".join(
-                                        first_value(
-                                            osoba.get("Imiona"),
-                                            ""
-                                        )
-                                        + " "
-                                        + first_value(
-                                            osoba.get("Nazwisko"),
-                                            ""
-                                        )
-                                        + " — "
-                                        + first_value(
-                                            osoba.get("Funkcja"),
-                                            ""
-                                        )
-                                        for osoba in osoby
+                            else:
+                                rejestr_people, rejestr_status = (
+                                    resolve_people_from_rejestr_io(
+                                        krs,
+                                        rejestr_io_api_key
                                     )
                                 )
 
-                            # -------------------------------------
-                            # OSOBY — KRS
-                            # -------------------------------------
-                            #
-                            # Osoby reprezentujące pobieramy z oficjalnego KRS.
-                            # CRBR służy tutaj wyłącznie do beneficjentów rzeczywistych.
-                            # Nie wymagamy, aby CRBR zwracał ListaReprezentantow,
-                            # ponieważ dla części podmiotów CRBR nie udostępnia tej sekcji.
-                            #
+                                if rejestr_people:
+                                    for person in rejestr_people:
 
-                            resolved_people = []
-                            resolver_details = []
-                            resolver_errors = []
-
-                            if representation_result is not None:
-
-                                krs_people = representation_result.get(
-                                    "Osoby reprezentujące",
-                                    []
-                                )
-
-                                for person in krs_people:
-
-                                    full_name = " ".join(
-                                        part
-                                        for part in (
-                                            first_value(person.get("Imiona"), ""),
-                                            first_value(person.get("Nazwisko"), "")
+                                        resolved_people.append(
+                                            person
                                         )
-                                        if part
-                                    ).strip()
 
-                                    if not full_name:
-                                        continue
-
-                                    resolved_people.append({
-                                        "Osoba": full_name,
-                                        "Funkcja": first_value(
-                                            person.get("Funkcja"),
-                                            ""
-                                        ),
-                                        "Rodzaj reprezentacji": first_value(
-                                            person.get("Funkcja"),
-                                            ""
-                                        ),
-                                        "Data urodzenia": "",
-                                        "Obywatelstwo": "",
-                                        "Rezydencja": "",
-                                        "Confidence": 100,
-                                        "Źródło": "KRS — Ministerstwo Sprawiedliwości"
-                                    })
-
-                            else:
-                                resolver_errors.append(
-                                    f"KRS — {representation_status}"
-                                )
+                                        resolver_details.append({
+                                            "KRS maska": "",
+                                            "Funkcja": person.get(
+                                                "Funkcja",
+                                                ""
+                                            ),
+                                            "Resolver": (
+                                                "OK — Rejestr.io API"
+                                            ),
+                                            "Kandydaci": (
+                                                f"{person.get('Osoba', '')} "
+                                                f"(100%)"
+                                            )
+                                        })
+                                else:
+                                    resolver_errors.append(
+                                        f"Rejestr.io — {rejestr_status}"
+                                    )
 
                             # -------------------------------------
                             # SCREENING OSÓB
