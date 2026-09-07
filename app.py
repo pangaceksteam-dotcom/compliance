@@ -1240,7 +1240,7 @@ def get_giif_screen_index():
     ), status
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_eu_screen_index(token):
     sanctions, status = get_eu_sanctions(token)
 
@@ -1253,7 +1253,7 @@ def get_eu_screen_index(token):
     ), status
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_ofac_screen_index():
     sanctions, status = get_ofac_sanctions()
 
@@ -1266,7 +1266,7 @@ def get_ofac_screen_index():
     ), status
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_uk_screen_index():
     sanctions, status = get_uk_sanctions()
 
@@ -1894,27 +1894,38 @@ def parse_eu_csv(content):
 
     from io import BytesIO
 
-    try:
+    # EU FSF CSV jest publikowany jako CSV rozdzielany średnikiem,
+    # ale diagnostyka dopuszcza również wariant z przecinkiem/tabulatorem.
+    # Najpierw próbujemy standardowego UTF-8 z BOM.
+    last_error = None
 
-        eu = pd.read_csv(
-            BytesIO(content),
-            sep=";",
-            dtype=str,
-            keep_default_na=False
-        )
+    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+        for separator in (";", ",", "\t"):
+            try:
+                eu = pd.read_csv(
+                    BytesIO(content),
+                    sep=separator,
+                    dtype=str,
+                    keep_default_na=False,
+                    encoding=encoding,
+                )
 
-    except UnicodeDecodeError:
+                if eu.shape[1] >= 2:
+                    break
 
-        eu = pd.read_csv(
-            BytesIO(content),
-            sep=";",
-            dtype=str,
-            encoding="latin-1",
-            keep_default_na=False
+            except Exception as e:
+                last_error = e
+                eu = None
+
+        if eu is not None and eu.shape[1] >= 2:
+            break
+
+    if eu is None or eu.shape[1] < 2:
+        raise ValueError(
+            f"nie udało się odczytać CSV — {last_error}"
         )
 
     if eu.empty:
-
         raise ValueError(
             "plik CSV jest pusty"
         )
@@ -2000,125 +2011,111 @@ def parse_eu_xml(content):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_eu_sanctions(token):
 
     """
     Oficjalna EU Financial Sanctions File (FSF).
 
-    Aktualny endpoint FSF wymaga tokenu pobierania. Token jest bezpłatny
-    i można go uzyskać przez EU Login / konto FSF. Aplikacja nie używa
-    agregatora typu OpenSanctions jako zastępczego źródła.
-
-    Próby pobrania:
-    1. CSV 1.1 z tokenem
-    2. XML 1.1 z tokenem
+    Pobieramy aktualny plik 1.1 z tokenem użytkownika. Najpierw CSV,
+    następnie XML jako fallback. Cache jest krótki (10 min), żeby błąd
+    źródła/tokena nie był utrzymywany przez godzinę.
     """
 
     token = str(token or "").strip()
 
     if not token:
-
         return None, (
-            "UE FSF — wymagany token pobierania. "
-            "Ustaw EU_FSF_TOKEN w Streamlit Secrets / zmiennej środowiskowej "
-            "albo wklej token w panelu bocznym."
+            "UE FSF — BRAK TOKENU. "
+            "Wklej osobisty token FSF w panelu bocznym "
+            "albo ustaw EU_FSF_TOKEN w Streamlit Secrets."
         )
 
     urls = [
-
         (
-            EU_FSF_CSV_URL
-            + "?token="
-            + token,
-            "CSV"
+            EU_FSF_CSV_URL + "?token=" + token,
+            "CSV 1.1"
         ),
-
         (
-            EU_FSF_XML_URL
-            + "?token="
-            + token,
-            "XML"
+            EU_FSF_XML_URL + "?token=" + token,
+            "XML 1.1"
         )
     ]
 
     headers = {
-
         "User-Agent": (
             "Mozilla/5.0 "
             "(Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 "
-            "Chrome/140.0 Safari/537.36"
+            "(KHTML, like Gecko) Chrome/140.0 Safari/537.36"
         ),
-
         "Accept": (
             "text/csv,application/csv,"
             "application/xml,text/xml,"
             "application/octet-stream,*/*"
         ),
-
-        "Referer": (
-            "https://webgate.ec.europa.eu/fsd/fsf/"
-        )
+        "Referer": "https://webgate.ec.europa.eu/fsd/fsf/",
     }
 
-    last_error = ""
+    errors = []
 
     for url, file_type in urls:
-
         try:
-
             response = requests.get(
                 url,
                 timeout=90,
-                headers=headers
+                headers=headers,
+                allow_redirects=True,
             )
-
         except requests.RequestException as e:
-
-            last_error = (
-                f"{file_type}: {e}"
-            )
-
+            errors.append(f"{file_type}: błąd połączenia — {e}")
             continue
 
+        content_type = response.headers.get("Content-Type", "")
+        content_length = len(response.content or b"")
+
         if response.status_code != 200:
-
-            last_error = (
-                f"{file_type}: HTTP "
-                f"{response.status_code}"
+            errors.append(
+                f"{file_type}: HTTP {response.status_code}, "
+                f"Content-Type={content_type or 'brak'}, "
+                f"rozmiar={content_length} B"
             )
+            continue
 
+        if content_length < 100:
+            errors.append(
+                f"{file_type}: odpowiedź HTTP 200, ale plik ma tylko "
+                f"{content_length} B"
+            )
             continue
 
         try:
-
-            if file_type == "CSV":
-
-                eu = parse_eu_csv(
-                    response.content
-                )
-
+            if file_type.startswith("CSV"):
+                eu = parse_eu_csv(response.content)
             else:
+                eu = parse_eu_xml(response.content)
 
-                eu = parse_eu_xml(
-                    response.content
-                )
+            if eu is None or eu.empty:
+                raise ValueError("lista po parsowaniu jest pusta")
 
             return eu, (
-                f"OK — EU FSF {file_type}"
+                f"OK — EU FSF {file_type}; "
+                f"rekordów: {len(eu):,}; "
+                f"HTTP {response.status_code}; "
+                f"{content_length:,} B"
             )
 
         except Exception as e:
-
-            last_error = (
-                f"{file_type}: błąd parsowania — {e}"
+            errors.append(
+                f"{file_type}: błąd parsowania — {e}; "
+                f"Content-Type={content_type or 'brak'}; "
+                f"rozmiar={content_length} B"
             )
 
     return None, (
-        "UE FSF — nie udało się pobrać listy. "
-        + last_error
-        + ". Sprawdź, czy token jest aktualny."
+        "UE FSF — NIE POBRANO LISTY. "
+        + " | ".join(errors)
+        + "."
     )
 
 
@@ -2271,7 +2268,7 @@ def parse_ofac_xml(content, list_name):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_ofac_sanctions():
 
     """
@@ -2343,7 +2340,13 @@ def get_ofac_sanctions():
         ignore_index=True
     )
 
-    return result, "OK"
+    if result.empty:
+        return None, "OFAC — pobrano 0 rekordów"
+
+    return result, (
+        "OK — OFAC SDN + CONSOLIDATED; "
+        f"rekordów: {len(result):,}"
+    )
 
 
 def check_ofac_sanctions(
@@ -2493,7 +2496,7 @@ def parse_uk_csv(content):
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_uk_sanctions():
 
     """
@@ -2631,8 +2634,10 @@ def check_uk_sanctions(
         return None, status
 
     if not str(nip or "").strip() and not str(krs or "").strip():
-        matched_status, reason, wpis = _person_match_in_index(
-            sanctions, name, dob
+        matched_status, reason, wpis = _person_match_uk(
+            sanctions,
+            name,
+            dob
         )
     else:
         matched_status, reason, wpis = _fast_find_in_index(
@@ -2649,6 +2654,55 @@ def check_uk_sanctions(
         "wpis": wpis
     }, status
 
+
+
+# =========================================================
+# DIAGNOSTYKA ŹRÓDEŁ SANKCYJNYCH
+# =========================================================
+
+def get_sanctions_source_diagnostics(eu_token):
+    """
+    Jednoznacznie testuje pobranie i parsowanie wszystkich głównych
+    źródeł sankcyjnych. Nie pokazuje tokenów ani kluczy.
+    """
+
+    diagnostics = []
+
+    checks = [
+        ("MSWiA", get_mswiA_sanctions),
+        ("GIIF", get_giif_sanctions),
+        ("UE FSF", lambda: get_eu_sanctions(eu_token)),
+        ("OFAC", get_ofac_sanctions),
+        ("UK", get_uk_sanctions),
+    ]
+
+    for name, func in checks:
+        try:
+            data, status = func()
+
+            if data is None:
+                diagnostics.append({
+                    "Źródło": name,
+                    "Status": "❌ BŁĄD",
+                    "Szczegóły": str(status),
+                })
+                continue
+
+            count = len(data) if hasattr(data, "__len__") else "?"
+            diagnostics.append({
+                "Źródło": name,
+                "Status": "✅ OK",
+                "Szczegóły": f"{status}; rekordów: {count:,}" if isinstance(count, int) else str(status),
+            })
+
+        except Exception as e:
+            diagnostics.append({
+                "Źródło": name,
+                "Status": "❌ WYJĄTEK",
+                "Szczegóły": str(e),
+            })
+
+    return pd.DataFrame(diagnostics)
 
 
 # =========================================================
@@ -3339,6 +3393,31 @@ def get_final_screening_status(row):
 
 # Token ręczny ma pierwszeństwo przed Secrets / ENV.
 eu_fsf_token = eu_token_manual or get_eu_fsf_token()
+
+
+# =========================================================
+# TEST ŹRÓDEŁ
+# =========================================================
+
+if st.sidebar.button("🧪 Test źródeł sankcyjnych"):
+    with st.sidebar:
+        st.caption(
+            "Test pobiera aktualne listy i pokazuje liczbę rekordów. "
+            "Token UE nie jest wyświetlany."
+        )
+
+        diagnostics_df = get_sanctions_source_diagnostics(
+            eu_fsf_token
+        )
+
+        for _, diagnostic in diagnostics_df.iterrows():
+            st.write(
+                f"**{diagnostic['Źródło']} — "
+                f"{diagnostic['Status']}**"
+            )
+            st.caption(
+                str(diagnostic["Szczegóły"])
+            )
 
 
 # =========================================================
@@ -4074,225 +4153,142 @@ if uploaded_file is not None:
                             # SCREENING MSWiA
                             # -------------------------------------
 
-                            mswia_result, mswia_status = (
-                                check_mswiA_sanctions(
-                                    result.get(
-                                        "Nazwa KRS",
-                                        ""
-                                    ),
-                                    result.get(
-                                        "NIP KRS",
-                                        ""
-                                    ),
-                                    krs
-                                )
-                            )
-
-                            if mswia_result is None:
-
-                                result["MSWiA sankcje"] = (
-                                    "BŁĄD"
-                                )
-
-                                result["MSWiA dopasowanie"] = (
-                                    mswia_status
-                                )
-
-                            else:
-
-                                result["MSWiA sankcje"] = (
-                                    mswia_result.get(
-                                        "status",
-                                        ""
+                            try:
+                                mswia_result, mswia_status = (
+                                    check_mswiA_sanctions(
+                                        result.get("Nazwa KRS", ""),
+                                        result.get("NIP KRS", ""),
+                                        krs
                                     )
                                 )
 
-                                result["MSWiA dopasowanie"] = (
-                                    mswia_result.get(
-                                        "powod",
-                                        ""
+                                if mswia_result is None:
+                                    result["MSWiA sankcje"] = "BŁĄD"
+                                    result["MSWiA dopasowanie"] = mswia_status
+                                else:
+                                    result["MSWiA sankcje"] = mswia_result.get(
+                                        "status", "NIE ZNALEZIONO"
                                     )
-                                )
+                                    result["MSWiA dopasowanie"] = mswia_result.get(
+                                        "powod", ""
+                                    )
+
+                            except Exception as e:
+                                result["MSWiA sankcje"] = "BŁĄD"
+                                result["MSWiA dopasowanie"] = f"Wyjątek: {e}"
 
                             # -------------------------------------
                             # SCREENING GIIF
                             # -------------------------------------
 
-                            giif_result, giif_status = (
-                                check_giif_sanctions(
-                                    result.get(
-                                        "Nazwa KRS",
-                                        ""
-                                    ),
-                                    result.get(
-                                        "NIP KRS",
-                                        ""
-                                    ),
-                                    krs
-                                )
-                            )
-
-                            if giif_result is None:
-
-                                result["GIIF sankcje"] = (
-                                    "BŁĄD"
-                                )
-
-                                result["GIIF dopasowanie"] = (
-                                    giif_status
-                                )
-
-                            else:
-
-                                result["GIIF sankcje"] = (
-                                    giif_result.get(
-                                        "status",
-                                        ""
+                            try:
+                                giif_result, giif_status = (
+                                    check_giif_sanctions(
+                                        result.get("Nazwa KRS", ""),
+                                        result.get("NIP KRS", ""),
+                                        krs
                                     )
                                 )
 
-                                result["GIIF dopasowanie"] = (
-                                    giif_result.get(
-                                        "powod",
-                                        ""
+                                if giif_result is None:
+                                    result["GIIF sankcje"] = "BŁĄD"
+                                    result["GIIF dopasowanie"] = giif_status
+                                else:
+                                    result["GIIF sankcje"] = giif_result.get(
+                                        "status", "NIE ZNALEZIONO"
                                     )
-                                )
+                                    result["GIIF dopasowanie"] = giif_result.get(
+                                        "powod", ""
+                                    )
+
+                            except Exception as e:
+                                result["GIIF sankcje"] = "BŁĄD"
+                                result["GIIF dopasowanie"] = f"Wyjątek: {e}"
 
                             # -------------------------------------
                             # SCREENING UE
                             # -------------------------------------
 
-                            eu_result, eu_status = (
-                                check_eu_sanctions(
-                                    result.get(
-                                        "Nazwa KRS",
-                                        ""
-                                    ),
-                                    result.get(
-                                        "NIP KRS",
-                                        ""
-                                    ),
-                                    krs,
-                                    eu_fsf_token
-                                )
-                            )
-
-                            if eu_result is None:
-
-                                result["UE sankcje"] = (
-                                    "BŁĄD"
-                                )
-
-                                result["UE dopasowanie"] = (
-                                    eu_status
-                                )
-
-                            else:
-
-                                result["UE sankcje"] = (
-                                    eu_result.get(
-                                        "status",
-                                        ""
+                            try:
+                                eu_result, eu_status = (
+                                    check_eu_sanctions(
+                                        result.get("Nazwa KRS", ""),
+                                        result.get("NIP KRS", ""),
+                                        krs,
+                                        eu_fsf_token
                                     )
                                 )
 
-                                result["UE dopasowanie"] = (
-                                    eu_result.get(
-                                        "powod",
-                                        ""
+                                if eu_result is None:
+                                    result["UE sankcje"] = "BŁĄD"
+                                    result["UE dopasowanie"] = eu_status
+                                else:
+                                    result["UE sankcje"] = eu_result.get(
+                                        "status", "NIE ZNALEZIONO"
                                     )
-                                )
+                                    result["UE dopasowanie"] = eu_result.get(
+                                        "powod", ""
+                                    )
 
+                            except Exception as e:
+                                result["UE sankcje"] = "BŁĄD"
+                                result["UE dopasowanie"] = f"Wyjątek: {e}"
 
                             # -------------------------------------
                             # SCREENING UK
                             # -------------------------------------
 
-                            uk_result, uk_status = (
-                                check_uk_sanctions(
-                                    result.get(
-                                        "Nazwa KRS",
-                                        ""
-                                    ),
-                                    result.get(
-                                        "NIP KRS",
-                                        ""
-                                    ),
-                                    krs
-                                )
-                            )
-
-                            if uk_result is None:
-
-                                result["UK sankcje"] = (
-                                    "BŁĄD"
-                                )
-
-                                result["UK dopasowanie"] = (
-                                    uk_status
-                                )
-
-                            else:
-
-                                result["UK sankcje"] = (
-                                    uk_result.get(
-                                        "status",
-                                        ""
+                            try:
+                                uk_result, uk_status = (
+                                    check_uk_sanctions(
+                                        result.get("Nazwa KRS", ""),
+                                        result.get("NIP KRS", ""),
+                                        krs
                                     )
                                 )
 
-                                result["UK dopasowanie"] = (
-                                    uk_result.get(
-                                        "powod",
-                                        ""
+                                if uk_result is None:
+                                    result["UK sankcje"] = "BŁĄD"
+                                    result["UK dopasowanie"] = uk_status
+                                else:
+                                    result["UK sankcje"] = uk_result.get(
+                                        "status", "NIE ZNALEZIONO"
                                     )
-                                )
+                                    result["UK dopasowanie"] = uk_result.get(
+                                        "powod", ""
+                                    )
 
+                            except Exception as e:
+                                result["UK sankcje"] = "BŁĄD"
+                                result["UK dopasowanie"] = f"Wyjątek: {e}"
 
                             # -------------------------------------
                             # SCREENING USA / OFAC
                             # -------------------------------------
 
-                            ofac_result, ofac_status = (
-                                check_ofac_sanctions(
-                                    result.get(
-                                        "Nazwa KRS",
-                                        ""
-                                    ),
-                                    result.get(
-                                        "NIP KRS",
-                                        ""
-                                    ),
-                                    krs
-                                )
-                            )
-
-                            if ofac_result is None:
-
-                                result["USA sankcje"] = (
-                                    "BŁĄD"
-                                )
-
-                                result["USA dopasowanie"] = (
-                                    ofac_status
-                                )
-
-                            else:
-
-                                result["USA sankcje"] = (
-                                    ofac_result.get(
-                                        "status",
-                                        ""
+                            try:
+                                ofac_result, ofac_status = (
+                                    check_ofac_sanctions(
+                                        result.get("Nazwa KRS", ""),
+                                        result.get("NIP KRS", ""),
+                                        krs
                                     )
                                 )
 
-                                result["USA dopasowanie"] = (
-                                    ofac_result.get(
-                                        "powod",
-                                        ""
+                                if ofac_result is None:
+                                    result["USA sankcje"] = "BŁĄD"
+                                    result["USA dopasowanie"] = ofac_status
+                                else:
+                                    result["USA sankcje"] = ofac_result.get(
+                                        "status", "NIE ZNALEZIONO"
                                     )
-                                )
+                                    result["USA dopasowanie"] = ofac_result.get(
+                                        "powod", ""
+                                    )
 
+                            except Exception as e:
+                                result["USA sankcje"] = "BŁĄD"
+                                result["USA dopasowanie"] = f"Wyjątek: {e}"
 
                             # -------------------------------------
                             # DEBUG JSON
