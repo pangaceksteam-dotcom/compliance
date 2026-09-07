@@ -3607,6 +3607,16 @@ if uploaded_file is not None:
                                 )
                             )
 
+                            # Zapisujemy dane KRS natychmiast po odpowiedzi API.
+                            # Późniejszy błąd screeningu nie może ich wyzerować.
+                            if krs_data is not None:
+                                for key, value in krs_data.items():
+                                    if key in result:
+                                        result[key] = value
+
+                            if raw_json is not None:
+                                debug_data[nip] = raw_json
+
                             representation_result, representation_status = (
                                 get_krs_representation(
                                     krs
@@ -4119,19 +4129,7 @@ if uploaded_file is not None:
 
                                 debug_data[nip] = raw_json
 
-                            # -------------------------------------
-                            # DANE KRS
-                            # -------------------------------------
-
-                            if krs_data is not None:
-
-                                for key, value in (
-                                    krs_data.items()
-                                ):
-
-                                    if key in result:
-
-                                        result[key] = value
+                            # Dane KRS zostały już zapisane powyżej.
 
                         else:
 
@@ -4141,9 +4139,20 @@ if uploaded_file is not None:
 
                 except Exception as e:
 
-                    result["Status MF"] = (
-                        f"BŁĄD: {e}"
-                    )
+                    # MF/KRS mogą być poprawne, a wyjątek może pochodzić
+                    # dopiero z późniejszego screeningu. Nie nadpisujemy
+                    # wtedy poprawnego Status MF.
+                    if mf_data is None:
+                        result["Status MF"] = (
+                            f"BŁĄD: {e}"
+                        )
+                    else:
+                        result["Status MF"] = mf_status
+
+                    if result.get("Status KRS", "") == "":
+                        result["Status KRS"] = (
+                            f"BŁĄD dalszego przetwarzania: {e}"
+                        )
 
                 # -----------------------------------------
                 # STATUS KOŃCOWY
